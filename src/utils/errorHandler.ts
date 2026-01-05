@@ -1,10 +1,6 @@
-// import { Prisma } from '@prisma/client';
-import {
-    PrismaClientKnownRequestError,
-    PrismaClientValidationError,
-} from '@prisma/client/runtime/library';
 import logger from './logger';
 import { Response } from 'express';
+import mongoose from 'mongoose';
 
 // Error types for better error handling
 export enum ErrorType {
@@ -31,45 +27,43 @@ export class AppError extends Error {
     }
 }
 
-// Handle Prisma-specific errors
-export const handlePrismaError = (error: any): AppError => {
-    if (error instanceof PrismaClientKnownRequestError) {
-        // Handle known Prisma errors
-        switch (error.code) {
-            case 'P2002': // Unique constraint violation
-                return new AppError(
-                    'A record with this value already exists.',
-                    ErrorType.VALIDATION,
-                    409,
-                    { fields: error.meta?.target }
-                );
-            case 'P2025': // Record not found
-                return new AppError(
-                    'Record not found.',
-                    ErrorType.NOT_FOUND,
-                    404
-                );
-            case 'P2003': // Foreign key constraint failed
-                return new AppError(
-                    'Operation failed due to a relation constraint.',
-                    ErrorType.VALIDATION,
-                    400,
-                    { fields: error.meta?.field_name }
-                );
-            default:
-                logger.error(`Unhandled Prisma error: ${error.code}`, error);
-                return new AppError(
-                    'Database operation failed.',
-                    ErrorType.DATABASE,
-                    500
-                );
+// Handle MongoDB/Mongoose specific errors
+export const handleDatabaseError = (error: any): AppError => {
+    if (error.name === 'MongoServerError' || error.name === 'ValidationError' || error.name === 'CastError') {
+        // Handle unique constraint violation (code 11000 in MongoDB)
+        if (error.code === 11000) {
+            return new AppError(
+                'A record with this value already exists.',
+                ErrorType.VALIDATION,
+                409,
+                { fields: error.keyPattern }
+            );
         }
-    } else if (error instanceof PrismaClientValidationError) {
-        // Handle validation errors
+
+        // Handle Mongoose validation errors
+        if (error.name === 'ValidationError') {
+            return new AppError(
+                'Invalid data provided.',
+                ErrorType.VALIDATION,
+                400,
+                { errors: error.errors }
+            );
+        }
+
+        // Handle Mongoose cast errors (invalid ID format)
+        if (error.name === 'CastError') {
+            return new AppError(
+                `Invalid value for field ${error.path}: ${error.value}`,
+                ErrorType.VALIDATION,
+                400
+            );
+        }
+
+        logger.error(`Unhandled Database error: ${error.name}`, error);
         return new AppError(
-            'Invalid data provided.',
-            ErrorType.VALIDATION,
-            400
+            'Database operation failed.',
+            ErrorType.DATABASE,
+            500
         );
     } else if (error instanceof AppError) {
         // Pass through our custom errors
@@ -87,7 +81,7 @@ export const handlePrismaError = (error: any): AppError => {
 
 // Send error response
 export const sendErrorResponse = (res: Response, error: any) => {
-    const appError = handlePrismaError(error);
+    const appError = handleDatabaseError(error);
 
     res.status(appError.statusCode).json({
         success: false,
