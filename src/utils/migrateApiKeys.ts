@@ -1,8 +1,7 @@
-import { prisma } from './prisma';
-import type { Prisma } from '@prisma/client';
 import logger from './logger';
 import fs from 'fs';
 import path from 'path';
+import ApiKey from '../models/ApiKey';
 
 // Function to migrate in-memory API keys to database
 export const migrateApiKeys = async (inMemoryApiKeys: Map<string, any>) => {
@@ -15,39 +14,30 @@ export const migrateApiKeys = async (inMemoryApiKeys: Map<string, any>) => {
         fs.writeFileSync(backupPath, backupData);
         logger.info(`Backup of API keys created at ${backupPath}`);
 
-        // Begin transaction
-        const results = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-            const migrationResults = [];
+        const migrationResults = [];
 
-            for (const [key, data] of inMemoryApiKeys.entries()) {
-                // Check if key already exists in database
-                const existingKey = await tx.apiKey.findUnique({
-                    where: { key }
+        for (const [key, data] of inMemoryApiKeys.entries()) {
+            // Check if key already exists in database
+            const existingKey = await ApiKey.findOne({ key });
+
+            if (!existingKey) {
+                // Create new key in database
+                const newKey = await ApiKey.create({
+                    key,
+                    owner: data.owner,
+                    usageCount: data.usageCount || 0,
+                    lastUsed: data.lastUsed ? new Date(data.lastUsed) : undefined,
+                    isActive: data.isActive !== false // Default to true if not specified
                 });
 
-                if (!existingKey) {
-                    // Create new key in database
-                    const newKey = await tx.apiKey.create({
-                        data: {
-                            key,
-                            owner: data.owner,
-                            usageCount: data.usageCount || 0,
-                            lastUsed: data.lastUsed ? new Date(data.lastUsed) : null,
-                            isActive: data.isActive !== false // Default to true if not specified
-                        }
-                    });
-
-                    migrationResults.push({ key, status: 'created', id: newKey.id });
-                } else {
-                    migrationResults.push({ key, status: 'already_exists', id: existingKey.id });
-                }
+                migrationResults.push({ key, status: 'created', id: newKey._id });
+            } else {
+                migrationResults.push({ key, status: 'already_exists', id: existingKey._id });
             }
+        }
 
-            return migrationResults;
-        });
-
-        const created = results.filter((r: any) => r.status === 'created').length;
-        const existing = results.filter((r: any) => r.status === 'already_exists').length;
+        const created = migrationResults.filter((r: any) => r.status === 'created').length;
+        const existing = migrationResults.filter((r: any) => r.status === 'already_exists').length;
 
         logger.info(`Migration completed: ${created} keys created, ${existing} keys already existed`);
         return { created, existing, total: inMemoryApiKeys.size };

@@ -487,18 +487,15 @@ LOG_LEVEL=debug
 - Cheerio – HTML parsing
 - Puppeteer – headless browser automation (used for CBE scraping)
 - Winston – structured logging
-- Prisma + MySQL (persistent storage)
+- Mongoose + MongoDB (persistent storage)
 - Mistral AI – OCR for image-based verification
 
 ---
 
-## 🛠 Prisma Integration
-
-- `apiKey` model stores API key, usage count, owner, timestamps.
-- `usageLog` model stores every request metadata:
-  - endpoint, method, status code, duration, IP, API key ID
-
-Stats are used for `/admin/stats` endpoint and dashboard monitoring.
+## 🧰 Technology Stack
+- **Database**: MongoDB (via Mongoose)
+- **OCR**: Mistral AI Vision (Pixtral)
+- **Logging**: Winston
 
 ---
 
