@@ -11,9 +11,10 @@ dotenv.config();
 
 const upload = multer({ dest: "uploads/" });
 
-const client = new Mistral({
-    apiKey: process.env.MISTRAL_API_KEY!,
-});
+// Initialize Mistral client only if API key is available
+const client = process.env.MISTRAL_API_KEY ? new Mistral({
+    apiKey: process.env.MISTRAL_API_KEY,
+}) : null;
 
 export const verifyImageHandler = [
     upload.single("file"),
@@ -31,6 +32,39 @@ export const verifyImageHandler = [
 
             const filePath = req.file.path;
             const imageBuffer = fs.readFileSync(filePath);
+            
+            // Get basic file information
+            const fileSize = req.file.size;
+            const mimeType = req.file.mimetype;
+            
+            logger.info(`Image uploaded: ${req.file.originalname}, Size: ${fileSize} bytes, Type: ${mimeType}`);
+
+            // Check if Mistral AI is available for OCR
+            if (!client) {
+                // Fallback response when no API key is available
+                res.json({
+                    success: true,
+                    message: "Image uploaded successfully. OCR analysis is currently disabled.",
+                    fileInfo: {
+                        originalName: req.file.originalname,
+                        size: fileSize,
+                        mimeType: mimeType,
+                        uploadedAt: new Date().toISOString()
+                    },
+                    nextSteps: {
+                        instruction: "Please enter the transaction reference number manually.",
+                        telebirrEndpoint: "/verify-telebirr",
+                        cbeEndpoint: "/verify-cbe",
+                        dashenEndpoint: "/verify-dashen",
+                        abyssiniaEndpoint: "/verify-abyssinia",
+                        cbebirrEndpoint: "/verify-cbebirr"
+                    },
+                    note: "OCR functionality requires Mistral AI API key. Without it, please verify transactions using the reference numbers from your receipt."
+                });
+                return;
+            }
+
+            // Use Mistral AI for OCR analysis
             const base64Image = imageBuffer.toString("base64");
 
             const prompt = `

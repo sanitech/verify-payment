@@ -70,8 +70,9 @@ It allows applications to verify the authenticity and details of payment receipt
 ### 🔷 Image-based Payment Verification
 
 - Verifies payments by analyzing uploaded receipt images
-- Uses **Mistral AI** to detect receipt type and extract transaction details
+- Uses **Mistral AI** to detect receipt type and extract transaction details (when API key is provided)
 - Supports both **CBE** and **Telebirr** receipt screenshots
+- **Note**: Without Mistral AI API key, the endpoint will accept image uploads but requires manual reference entry
 
 ---
 
@@ -151,8 +152,6 @@ pnpm start
 
 Verify a CBE payment using a reference number and account suffix.
 
-**Requires API Key**
-
 **Request Body:**
 
 ```json
@@ -170,8 +169,6 @@ Verify a CBE payment using a reference number and account suffix.
 
 Verify a Telebirr payment using a reference number.
 
-**Requires API Key**
-
 **Request Body:**
 
 ```json
@@ -187,8 +184,6 @@ Verify a Telebirr payment using a reference number.
 #### `POST /verify-dashen`
 
 Verify a Dashen bank payment using a reference number.
-
-**Requires API Key**
 
 **Request Body:**
 
@@ -226,8 +221,6 @@ Verify a Dashen bank payment using a reference number.
 
 Verify a Bank of Abyssinia payment using a reference number and 5-digit suffix.
 
-**Requires API Key**
-
 **Request Body:**
 
 ```json
@@ -247,8 +240,6 @@ Verify a Bank of Abyssinia payment using a reference number and 5-digit suffix.
 
 Verify a CBE Birr payment using receipt number and phone number.
 
-**Requires API Key**
-
 **Request Body:**
 
 ```json
@@ -265,8 +256,6 @@ Verify a CBE Birr payment using receipt number and phone number.
 ### ✅ Image Verification
 
 #### `POST /verify-image`
-
-**Requires API Key**
 
 Verify a payment by uploading an image of the receipt. This endpoint supports both CBE and Telebirr screenshots.
 
@@ -285,7 +274,6 @@ Multipart form-data with an image file.
 
 ```bash
 curl -X POST https://verifyapi.leulzenebe.pro/verify-cbe \
-  -H "x-api-key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{ "reference": "FT2513001V2G", "accountSuffix": "39003377" }'
 ```
@@ -294,7 +282,6 @@ curl -X POST https://verifyapi.leulzenebe.pro/verify-cbe \
 
 ```bash
 curl -X POST https://verifyapi.leulzenebe.pro/verify-telebirr \
-  -H "x-api-key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{ "reference": "CE2513001XYT" }'
 ```
@@ -303,7 +290,6 @@ curl -X POST https://verifyapi.leulzenebe.pro/verify-telebirr \
 
 ```bash
 curl -X POST https://verifyapi.leulzenebe.pro/verify-dashen \
-  -H "x-api-key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{ "reference": "DASHEN_REFERENCE_NUMBER" }'
 ```
@@ -312,7 +298,6 @@ curl -X POST https://verifyapi.leulzenebe.pro/verify-dashen \
 
 ```bash
 curl -X POST https://verifyapi.leulzenebe.pro/verify-abyssinia \
-  -H "x-api-key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{ "reference": "ABYSSINIA_REFERENCE", "suffix": "12345" }'
 ```
@@ -321,7 +306,6 @@ curl -X POST https://verifyapi.leulzenebe.pro/verify-abyssinia \
 
 ```bash
 curl -X POST https://verifyapi.leulzenebe.pro/verify-cbebirr \
-  -H "x-api-key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{ "receiptNumber": "RECEIPT_NUMBER", "phoneNumber": "251912345678" }'
 ```
@@ -330,7 +314,6 @@ curl -X POST https://verifyapi.leulzenebe.pro/verify-cbebirr \
 
 ```bash
 curl -X POST https://verifyapi.leulzenebe.pro/verify-image?autoVerify=true \
-  -H "x-api-key: YOUR_API_KEY" \
   -F "file=@yourfile.jpg" \
   -F "suffix=39003377"
 ```
@@ -436,7 +419,7 @@ Create a `.env` file in the root directory with the following variables:
 PORT=3001
 NODE_ENV=development # or production
 LOG_LEVEL=info       # or debug, error
-MISTRAL_API_KEY=your_mistral_api_key # Required for image verification
+MISTRAL_API_KEY=your_mistral_api_key # Optional: Required for image OCR functionality
 SKIP_PRIMARY_VERIFICATION=false      # Set to true to bypass primary fetch
 ```
 
@@ -462,19 +445,19 @@ LOG_LEVEL=debug
 
 ## 📦 Endpoint Summary
 
-| Method | Endpoint              | Auth | Description                        |
-|--------|-----------------------|------|------------------------------------|
-| POST   | `/verify-cbe`         | ✅    | CBE transaction by reference + suffix |
-| POST   | `/verify-telebirr`    | ✅    | Telebirr receipt by reference       |
-| POST   | `/verify-dashen`      | ✅    | Dashen bank transaction by reference |
-| POST   | `/verify-abyssinia`   | ✅    | Abyssinia bank transaction by reference + suffix |
-| POST   | `/verify-cbebirr`     | ✅    | CBE Birr transaction by receipt + phone |
-| POST   | `/verify-image`       | ✅    | Image upload for receipt OCR        |
-| GET    | `/health`             | ❌    | Health check                        |
-| GET    | `/`                   | ❌    | API metadata                        |
-| GET    | `/admin/stats`        | 🔐    | API usage stats                     |
-| GET    | `/admin/api-keys`     | 🔐    | List all API keys                   |
-| POST   | `/admin/api-keys`     | 🔐    | Generate API key                    |
+| Method | Endpoint              | Description                        |
+|--------|-----------------------|------------------------------------|
+| POST   | `/verify-cbe`         | CBE transaction by reference + suffix |
+| POST   | `/verify-telebirr`    | Telebirr receipt by reference       |
+| POST   | `/verify-dashen`      | Dashen bank transaction by reference |
+| POST   | `/verify-abyssinia`   | Abyssinia bank transaction by reference + suffix |
+| POST   | `/verify-cbebirr`     | CBE Birr transaction by receipt + phone |
+| POST   | `/verify-image`       | Image upload for receipt OCR        |
+| GET    | `/health`             | Health check                        |
+| GET    | `/`                   | API metadata                        |
+| GET    | `/admin/stats`        | API usage stats                     |
+| GET    | `/admin/api-keys`     | List all API keys                   |
+| POST   | `/admin/api-keys`     | Generate API key                    |
 
 
 ---
