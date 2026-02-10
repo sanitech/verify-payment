@@ -2,6 +2,13 @@ import axios, { AxiosError } from "axios";
 import * as cheerio from "cheerio";
 import logger from '../utils/logger';
 
+const VERIFY_RETRY_COUNT = parseInt(process.env.VERIFY_RETRY_COUNT || "3", 10);
+const VERIFY_RETRY_DELAY_MS = parseInt(process.env.VERIFY_RETRY_DELAY_MS || "3000", 10);
+
+function delay(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export interface TelebirrReceipt {
     payerName: string;
     payerTelebirrNo: string;
@@ -324,7 +331,7 @@ async function fetchFromPrimarySource(reference: string, baseUrl: string): Promi
 
     try {
         logger.info(`Attempting to fetch Telebirr receipt from primary source: ${url}`);
-        const response = await axios.get(url, { timeout: 15000 }); // 15 second timeout
+        const response = await axios.get(url, { timeout: 60000 }); // 60 second timeout
         logger.debug(`Received response with status: ${response.status}`);
 
         const extractedData = scrapeTelebirrReceipt(response.data);
@@ -374,7 +381,7 @@ async function fetchFromProxySource(reference: string, proxyUrl: string): Promis
     try {
         logger.info(`Attempting to fetch Telebirr receipt from proxy: ${url}`);
         const response = await axios.get(url, {
-            timeout: 15000,
+            timeout: 60000,
             headers: {
                 'Accept': 'application/json',
                 'User-Agent': 'VerifierAPI/1.0'
@@ -431,6 +438,27 @@ async function fetchFromProxySource(reference: string, proxyUrl: string): Promis
     }
 }
 
+async function attemptFetch(
+    fetcher: (reference: string, url: string) => Promise<TelebirrReceipt | null>,
+    reference: string,
+    url: string,
+    label: string
+): Promise<TelebirrReceipt | null> {
+    for (let attempt = 1; attempt <= VERIFY_RETRY_COUNT; attempt++) {
+        const result = await fetcher(reference, url);
+        if (result && isValidReceipt(result)) {
+            return result;
+        }
+
+        if (attempt < VERIFY_RETRY_COUNT) {
+            logger.warn(`${label} attempt ${attempt} failed for reference ${reference}. Retrying in ${VERIFY_RETRY_DELAY_MS}ms...`);
+            await delay(VERIFY_RETRY_DELAY_MS);
+        }
+    }
+
+    return null;
+}
+
 export async function verifyTelebirr(reference: string): Promise<TelebirrReceipt | null> {
     const primaryUrl = "https://transactioninfo.ethiotelecom.et/receipt/";
     const fallbackUrl = "https://leul.et/verify.php?reference=";
@@ -438,14 +466,14 @@ export async function verifyTelebirr(reference: string): Promise<TelebirrReceipt
     const skipPrimary = process.env.SKIP_PRIMARY_VERIFICATION === "true";
 
     if (!skipPrimary) {
-        const primaryResult = await fetchFromPrimarySource(reference, primaryUrl);
+        const primaryResult = await attemptFetch(fetchFromPrimarySource, reference, primaryUrl, "primary source");
         if (primaryResult && isValidReceipt(primaryResult)) return primaryResult;
         logger.warn(`Primary Telebirr verification failed for reference: ${reference}. Trying fallback proxy...`);
     } else {
         logger.info(`Skipping primary verifier due to SKIP_PRIMARY_VERIFICATION=true`);
     }
 
-    const fallbackResult = await fetchFromProxySource(reference, fallbackUrl);
+    const fallbackResult = await attemptFetch(fetchFromProxySource, reference, fallbackUrl, "fallback proxy");
     if (fallbackResult && isValidReceipt(fallbackResult)) {
         logger.info(`Successfully verified Telebirr receipt using fallback proxy for reference: ${reference}`);
         return fallbackResult;
