@@ -2,8 +2,20 @@ import axios, { AxiosError } from "axios";
 import * as cheerio from "cheerio";
 import logger from '../utils/logger';
 
-const VERIFY_RETRY_COUNT = parseInt(process.env.VERIFY_RETRY_COUNT || "3", 10);
-const VERIFY_RETRY_DELAY_MS = parseInt(process.env.VERIFY_RETRY_DELAY_MS || "3000", 10);
+/** Thrown when the Telebirr proxy returns 502/503/504 (gateway timeout or unavailable). */
+export class TelebirrProxyTimeoutError extends Error {
+    readonly statusCode = 504;
+    readonly code = 'PROXY_TIMEOUT';
+    constructor(message: string = 'Verification service timed out. Please try again.') {
+        super(message);
+        this.name = 'TelebirrProxyTimeoutError';
+    }
+}
+
+// Keep retries very small in production to avoid long request times on Render/other hosts.
+// Can still be overridden via VERIFY_RETRY_COUNT / VERIFY_RETRY_DELAY_MS env vars if needed.
+const VERIFY_RETRY_COUNT = parseInt(process.env.VERIFY_RETRY_COUNT || "2", 10);
+const VERIFY_RETRY_DELAY_MS = parseInt(process.env.VERIFY_RETRY_DELAY_MS || "1500", 10);
 
 function delay(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -376,17 +388,22 @@ async function fetchFromPrimarySource(reference: string, baseUrl: string): Promi
  * @returns The parsed receipt data or null if failed
  */
 async function fetchFromProxySource(reference: string, proxyUrl: string): Promise<TelebirrReceipt | null> {
-    const url = `${proxyUrl}${reference}`;
+    const url = proxyUrl;
 
     try {
         logger.info(`Attempting to fetch Telebirr receipt from proxy: ${url}`);
-        const response = await axios.get(url, {
-            timeout: 60000,
-            headers: {
-                'Accept': 'application/json',
-                'User-Agent': 'VerifierAPI/1.0'
+        const response = await axios.post(
+            url,
+            { reference },
+            {
+                timeout: 60000,
+                headers: {
+                    'Accept': 'application/json',
+                    'User-Agent': 'VerifierAPI/1.0',
+                    'Content-Type': 'application/json'
+                }
             }
-        });
+        );
 
         logger.debug(`Received proxy response with status: ${response.status}`);
 
@@ -418,10 +435,19 @@ async function fetchFromProxySource(reference: string, proxyUrl: string): Promis
 
         return extractedData;
     } catch (error) {
+        const axiosError = error as AxiosError;
+        const status = axiosError.response?.status;
+
+        // Surface proxy gateway timeouts so the API can return 504 and a clear message.
+        if (status === 502 || status === 503 || status === 504) {
+            logger.warn(`Telebirr proxy returned ${status} (Gateway Timeout/Unavailable): ${url}`);
+            throw new TelebirrProxyTimeoutError(
+                'Verification service temporarily unavailable (timeout). Please try again in a moment.'
+            );
+        }
+
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
         const errorStack = error instanceof Error ? error.stack : undefined;
-
-        const axiosError = error as AxiosError;
         const responseDetails = axiosError.response ? {
             status: axiosError.response.status,
             statusText: axiosError.response.statusText,
@@ -461,7 +487,9 @@ async function attemptFetch(
 
 export async function verifyTelebirr(reference: string): Promise<TelebirrReceipt | null> {
     const primaryUrl = "https://transactioninfo.ethiotelecom.et/receipt/";
-    const fallbackUrl = "https://leul.et/verify.php?reference=";
+    const fallbackUrl =
+        process.env.TELEBIRR_FALLBACK_URL ||
+        "https://payment-verify.pinael.com/verify-telebirr";
 
     const skipPrimary = process.env.SKIP_PRIMARY_VERIFICATION === "true";
 

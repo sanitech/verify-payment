@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { verifyTelebirr } from '../services/verifyTelebirr';
+import { verifyTelebirr, TelebirrProxyTimeoutError } from '../services/verifyTelebirr';
 import logger from '../utils/logger';
 
 const router = Router();
@@ -26,9 +26,17 @@ router.post<{}, {}, VerifyTelebirrRequestBody>(
             }
             res.json({ success: true, data: result });
         } catch (err) {
+            if (err instanceof TelebirrProxyTimeoutError) {
+                res.status(504).json({
+                    success: false,
+                    error: err.message,
+                    code: err.code
+                });
+                return;
+            }
             logger.error('Telebirr verification error:', err);
-            res.status(500).json({ 
-                success: false, 
+            res.status(500).json({
+                success: false,
                 error: 'Server error verifying Telebirr receipt.',
                 message: err instanceof Error ? err.message : 'Unknown error'
             });
