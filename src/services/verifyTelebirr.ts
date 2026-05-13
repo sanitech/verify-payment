@@ -43,24 +43,25 @@ export interface TelebirrReceipt {
  */
 function extractSettledAmountRegex(htmlContent: string): string | null {
     // Pattern 1: Direct match with the exact text structure
-    const pattern1 = /የተከፈለው\s+መጠን\/Settled\s+Amount.*?<\/td>\s*<td[^>]*>\s*(\d+(?:\.\d{2})?\s+Birr)/is;
+    const pattern1 = /የተከፈለው\s+መጠን\/Settled\s+Amount.*?<\/td>\s*<td[^>]*>\s*([\d,]+(?:\.\d{2})?\s+Birr)/is;
     let match = htmlContent.match(pattern1);
-    if (match) return match[1].trim();
+    if (match) return match[1].replace(/,/g, '').trim();
 
     // Pattern 2: Look for the table row structure
-    const pattern2 = /<tr[^>]*>.*?የተከፈለው\s+መጠን\/Settled\s+Amount.*?<td[^>]*>\s*(\d+(?:\.\d{2})?\s+Birr)/is;
+    const pattern2 = /<tr[^>]*>.*?የተከፈለው\s+መጠን\/Settled\s+Amount.*?<td[^>]*>\s*([\d,]+(?:\.\d{2})?\s+Birr)/is;
     match = htmlContent.match(pattern2);
-    if (match) return match[1].trim();
+    if (match) return match[1].replace(/,/g, '').trim();
 
     // Pattern 3: More flexible approach - look for any cell containing "Settled Amount" followed by amount
-    const pattern3 = /Settled\s+Amount.*?(\d+(?:\.\d{2})?\s+Birr)/is;
+    // Only match within the same table row (<tr>) to avoid matching service fee row
+    const pattern3 = /Settled\s+Amount[\s\S]*?<td[^>]*>\s*([\d,]+(?:\.\d{2})?\s+Birr)/is;
     match = htmlContent.match(pattern3);
-    if (match) return match[1].trim();
+    if (match) return match[1].replace(/,/g, '').trim();
 
     // Pattern 4: Look specifically in the transaction details table
-    const pattern4 = /የክፍያ\s+ዝርዝር\/Transaction\s+details.*?<tr[^>]*>.*?<td[^>]*>\s*[^<]*<\/td>\s*<td[^>]*>\s*[^<]*<\/td>\s*<td[^>]*>\s*(\d+(?:\.\d{2})?\s+Birr)/is;
+    const pattern4 = /የክፍያ\s+ዝርዝር\/Transaction\s+details[\s\S]*?<tr[^>]*>[\s\S]*?<td[^>]*>\s*[^<]*<\/td>\s*<td[^>]*>\s*[^<]*<\/td>\s*<td[^>]*>\s*([\d,]+(?:\.\d{2})?\s+Birr)/is;
     match = htmlContent.match(pattern4);
-    if (match) return match[1].trim();
+    if (match) return match[1].replace(/,/g, '').trim();
 
     return null;
 }
