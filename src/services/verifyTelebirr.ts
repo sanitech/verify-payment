@@ -24,14 +24,41 @@ function delay(ms: number) {
 
 // ── Puppeteer shared browser singleton (lazy-init, reused across requests) ──
 
+import { execSync } from "child_process";
+
 let sharedBrowser: Browser | null = null;
+
+function findChromiumPath(): string | undefined {
+    // 1. Explicit env var takes priority
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) return process.env.PUPPETEER_EXECUTABLE_PATH;
+
+    // 2. Try common paths
+    const candidates = [
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+    ];
+    for (const p of candidates) {
+        try { require("fs").accessSync(p); return p; } catch {}
+    }
+
+    // 3. Try `which chromium`
+    try {
+        return execSync("which chromium 2>/dev/null || which chromium-browser 2>/dev/null", { encoding: "utf-8" }).trim();
+    } catch {}
+
+    return undefined;
+}
 
 async function getBrowser(): Promise<Browser> {
     if (sharedBrowser && sharedBrowser.connected) {
         return sharedBrowser;
     }
 
-    logger.info("Launching shared Puppeteer browser instance...");
+    const executablePath = findChromiumPath();
+    logger.info("Launching shared Puppeteer browser instance...", { executablePath: executablePath || "(default)" });
+
     sharedBrowser = await puppeteer.launch({
         headless: true,
         args: [
@@ -43,7 +70,7 @@ async function getBrowser(): Promise<Browser> {
             "--disable-extensions",
             "--disable-background-networking",
         ],
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        executablePath,
     });
 
     sharedBrowser.on("disconnected", () => {
