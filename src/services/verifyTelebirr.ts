@@ -1,5 +1,6 @@
 import axios, { AxiosError } from "axios";
 import * as cheerio from "cheerio";
+import puppeteer, { Browser } from "puppeteer-core";
 import logger from '../utils/logger';
 
 /** Thrown when the Telebirr proxy returns 502/503/504 (gateway timeout or unavailable). */
@@ -19,6 +20,47 @@ const VERIFY_RETRY_DELAY_MS = parseInt(process.env.VERIFY_RETRY_DELAY_MS || "150
 
 function delay(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ── Puppeteer shared browser singleton (lazy-init, reused across requests) ──
+
+let sharedBrowser: Browser | null = null;
+
+async function getBrowser(): Promise<Browser> {
+    if (sharedBrowser && sharedBrowser.connected) {
+        return sharedBrowser;
+    }
+
+    logger.info("Launching shared Puppeteer browser instance...");
+    sharedBrowser = await puppeteer.launch({
+        headless: true,
+        args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--ignore-certificate-errors",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-extensions",
+            "--disable-background-networking",
+        ],
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+    });
+
+    sharedBrowser.on("disconnected", () => {
+        logger.warn("Puppeteer browser disconnected, will re-launch on next request.");
+        sharedBrowser = null;
+    });
+
+    return sharedBrowser;
+}
+
+export async function cleanupBrowser(): Promise<void> {
+    if (sharedBrowser) {
+        try {
+            await sharedBrowser.close();
+        } catch { /* ignore */ }
+        sharedBrowser = null;
+    }
 }
 
 export interface TelebirrReceipt {
@@ -383,6 +425,52 @@ async function fetchFromPrimarySource(reference: string, baseUrl: string): Promi
 }
 
 /**
+ * Fetches Telebirr receipt HTML via Puppeteer (headless browser) then scrapes it.
+ * Uses the shared browser singleton and blocks images/CSS/fonts for speed.
+ */
+async function fetchFromPuppeteer(reference: string, baseUrl: string): Promise<TelebirrReceipt | null> {
+    const url = `${baseUrl}${reference}`;
+    let page;
+    try {
+        logger.info(`Attempting to fetch Telebirr receipt via Puppeteer: ${url}`);
+        const browser = await getBrowser();
+        page = await browser.newPage();
+
+        await page.setRequestInterception(true);
+        page.on("request", (req) => {
+            const resourceType = req.resourceType();
+            if (["image", "stylesheet", "font", "media"].includes(resourceType)) {
+                req.abort();
+            } else {
+                req.continue();
+            }
+        });
+
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+        const html = await page.content();
+        logger.debug(`Puppeteer received ${html.length} bytes of HTML for reference: ${reference}`);
+
+        const extractedData = scrapeTelebirrReceipt(html);
+
+        logger.info(`Puppeteer extracted Telebirr data for reference: ${reference}`, {
+            receiptNo: extractedData.receiptNo,
+            payerName: extractedData.payerName,
+            transactionStatus: extractedData.transactionStatus,
+        });
+
+        return extractedData;
+    } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : "Unknown error";
+        logger.error(`Puppeteer fetch failed for reference ${reference}:`, { error: errorMessage });
+        return null;
+    } finally {
+        if (page) {
+            try { await page.close(); } catch { /* ignore */ }
+        }
+    }
+}
+
+/**
  * Fetches and processes Telebirr receipt data from the fallback proxy (JSON)
  * @param reference The Telebirr reference number
  * @param proxyUrl The proxy URL to fetch the receipt from
@@ -494,21 +582,31 @@ export async function verifyTelebirr(reference: string): Promise<TelebirrReceipt
 
     const skipPrimary = process.env.SKIP_PRIMARY_VERIFICATION === "true";
 
+    // Step 1: Direct axios fetch
     if (!skipPrimary) {
         const primaryResult = await attemptFetch(fetchFromPrimarySource, reference, primaryUrl, "primary source");
         if (primaryResult && isValidReceipt(primaryResult)) return primaryResult;
-        logger.warn(`Primary Telebirr verification failed for reference: ${reference}. Trying fallback proxy...`);
+        logger.warn(`Primary Telebirr verification failed for reference: ${reference}. Trying Puppeteer...`);
     } else {
         logger.info(`Skipping primary verifier due to SKIP_PRIMARY_VERIFICATION=true`);
     }
 
+    // Step 2: Puppeteer fallback (shared browser, blocked resources)
+    const puppeteerResult = await attemptFetch(fetchFromPuppeteer, reference, primaryUrl, "puppeteer");
+    if (puppeteerResult && isValidReceipt(puppeteerResult)) {
+        logger.info(`Successfully verified Telebirr receipt via Puppeteer for reference: ${reference}`);
+        return puppeteerResult;
+    }
+    logger.warn(`Puppeteer verification failed for reference: ${reference}. Trying fallback proxy...`);
+
+    // Step 3: Fallback proxy
     const fallbackResult = await attemptFetch(fetchFromProxySource, reference, fallbackUrl, "fallback proxy");
     if (fallbackResult && isValidReceipt(fallbackResult)) {
         logger.info(`Successfully verified Telebirr receipt using fallback proxy for reference: ${reference}`);
         return fallbackResult;
     }
 
-    logger.error(`Both primary and fallback Telebirr verification failed for reference: ${reference}`);
+    logger.error(`All Telebirr verification methods failed for reference: ${reference}`);
     return null;
 }
 
