@@ -6,14 +6,20 @@ import telebirrRouter from './routes/verifyTelebirrRoute';
 import dashenRouter from './routes/verifyDashenRoute';
 import abyssiniaRouter from './routes/verifyAbyssiniaRoute';
 import cbebirrRouter from './routes/verifyCBEBirrRoute';
+import ebirrRouter from './routes/verifyEbirrRoute';
 import logger from './utils/logger';
 import { verifyImageHandler } from './services/verifyImage';
 import { requestLogger } from './middleware/requestLogger';
+import { jsonBodyParser } from './middleware/bodyParser';
+
 
 const app = express();
 
 app.use(cors());
+// Parse regular Node/Express JSON requests before the deployment-specific
+// body parser handles pre-populated serverless request bodies.
 app.use(express.json());
+app.use(jsonBodyParser);
 
 // Add request logging middleware
 app.use(requestLogger);
@@ -37,6 +43,7 @@ app.use('/verify-telebirr', telebirrRouter);
 app.use('/verify-dashen', dashenRouter);
 app.use('/verify-abyssinia', abyssiniaRouter);
 app.use('/verify-cbebirr', cbebirrRouter);
+app.use('/verify-ebirr', ebirrRouter);
 app.post('/verify-image', verifyImageHandler);
 
 // Health check endpoint
@@ -55,6 +62,7 @@ app.get('/', (req: Request, res: Response) => {
       '/verify-dashen',
       '/verify-abyssinia',
       '/verify-cbebirr',
+      '/verify-ebirr',
       '/verify-image'
     ]
   });

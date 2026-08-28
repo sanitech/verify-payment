@@ -42,31 +42,35 @@ const fileFormat = printf(({ level, message, timestamp, stack, ...meta }) => {
     return log;
 });
 
-// 🗂 Error Log File (Rotating)
-const errorRotateFile = new transports.DailyRotateFile({
-    filename: 'logs/error-%DATE%.log',
-    datePattern: 'YYYY-MM-DD',
-    level: 'error',
-    maxSize: '5m',
-    maxFiles: '14d',
-    format: combine(
-        errors({ stack: true }),
-        timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-        fileFormat
-    )
-});
+const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
 
-// 🗂 Combined Log File (Rotating)
-const combinedRotateFile = new transports.DailyRotateFile({
-    filename: 'logs/combined-%DATE%.log',
-    datePattern: 'YYYY-MM-DD',
-    maxSize: '5m',
-    maxFiles: '14d',
-    format: combine(
-        timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-        fileFormat
-    )
-});
+const fileTransports: any[] = [];
+if (!isServerless) {
+    fileTransports.push(
+        new transports.DailyRotateFile({
+            filename: 'logs/error-%DATE%.log',
+            datePattern: 'YYYY-MM-DD',
+            level: 'error',
+            maxSize: '5m',
+            maxFiles: '14d',
+            format: combine(
+                errors({ stack: true }),
+                timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+                fileFormat
+            )
+        }),
+        new transports.DailyRotateFile({
+            filename: 'logs/combined-%DATE%.log',
+            datePattern: 'YYYY-MM-DD',
+            maxSize: '5m',
+            maxFiles: '14d',
+            format: combine(
+                timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+                fileFormat
+            )
+        })
+    );
+}
 
 // 🧠 Main Winston Logger
 const logger = createLogger({
@@ -85,8 +89,7 @@ const logger = createLogger({
                 emojiFormat
             )
         }),
-        errorRotateFile,
-        combinedRotateFile
+        ...fileTransports
     ],
     exitOnError: false
 });

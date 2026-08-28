@@ -9,7 +9,9 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const upload = multer({ dest: "uploads/" });
+const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
+const storage = isServerless ? multer.memoryStorage() : multer.diskStorage({ destination: "uploads/" });
+const upload = multer({ storage });
 
 // Initialize Mistral client only if API key is available
 const client = process.env.MISTRAL_API_KEY ? new Mistral({
@@ -30,13 +32,10 @@ export const verifyImageHandler = [
                 return;
             }
 
-            const filePath = req.file.path;
-            const imageBuffer = fs.readFileSync(filePath);
-            
-            // Get basic file information
+            const imageBuffer = req.file.buffer || fs.readFileSync(req.file.path);
             const fileSize = req.file.size;
             const mimeType = req.file.mimetype;
-            
+
             logger.info(`Image uploaded: ${req.file.originalname}, Size: ${fileSize} bytes, Type: ${mimeType}`);
 
             // Check if Mistral AI is available for OCR
@@ -180,7 +179,7 @@ Return this JSON format exactly:
             });
             res.status(500).json({ error: "Something went wrong processing the image." });
         } finally {
-            if (req.file?.path) {
+            if (req.file?.path && !req.file.buffer) {
                 fs.unlinkSync(req.file.path);
                 logger.debug("Temp file deleted", { path: req.file.path });
             }

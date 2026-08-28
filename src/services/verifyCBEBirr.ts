@@ -97,52 +97,39 @@ function parseCBEBirrReceipt(pdfText: string): CBEBirrReceipt | null {
     // Customer Name: LIUL ZENEBE ADMASU (from Customer Information section)
     // The PDF shows "Customer Name: LIUL ZENEBE ADMASU" but our pattern is matching "Region:"
     // Let's look for the actual customer name pattern
-    const customerName = extractValue(pdfText, /Customer Name:\s*([^\n\r]+?)(?=\s*Region:)/i) || 
-                        extractValue(pdfText, /LIUL ZENEBE ADMASU/i) ||
-                        'LIUL ZENEBE ADMASU';
+    const customerName = extractValue(pdfText, /Customer Name:\s*([^\n\r]+?)(?=\s*Region:)/i);
     
     // Debit Account: should be empty in the PDF based on the image
     // The pattern is matching "Org Account" which seems to be a label, not the actual account
     const debitAccount = '';
     
     // Credit Account: 251902523658 - LIUL ZENEBE ADMASU
-    const creditAccount = extractValue(pdfText, /Credit Account[\s\n\r]+([^\n\r]+?)(?=\s*Receiver Name)/i) ||
-                         extractValue(pdfText, /(251902523658\s*-\s*LIUL ZENEBE ADMASU)/i) ||
-                         '251902523658 - LIUL ZENEBE ADMASU';
+    const creditAccount = extractValue(pdfText, /Credit Account[\s\n\r]+([^\n\r]+?)(?=\s*Receiver Name)/i);
     
     // Receiver Name: 251902523658 - LIUL ZENEBE ADMASU
-    const receiverName = extractValue(pdfText, /Receiver Name[\s\n\r]+([^\n\r]+?)(?=\s*Order ID)/i) ||
-                        extractValue(pdfText, /(251902523658\s*-\s*LIUL ZENEBE ADMASU)/i) ||
-                        '251902523658 - LIUL ZENEBE ADMASU';
+    const receiverName = extractValue(pdfText, /Receiver Name[\s\n\r]+([^\n\r]+?)(?=\s*Order ID)/i);
     
     // Order ID: FT25211JYPQX
     const orderId = extractValue(pdfText, /Order ID[\s\n\r]+([A-Z0-9]+)/i) ||
                    extractValue(pdfText, /(FT\d+[A-Z0-9]*)/i) ||
-                   'FT25211JYPQX';
+                   '';
     
     // Transaction Status: Completed
     const transactionStatus = extractValue(pdfText, /Transaction Status[\s\n\r]+([^\n\r]+?)(?=\s*Reference)/i) ||
-                             extractValue(pdfText, /Completed/i) ||
-                             'Completed';
+                             '';
     
     // Reference: FT25211JYPQX (same as Order ID)
     const reference = extractValue(pdfText, /Reference[\s\n\r]+([^\n\r]+?)(?=\s*Receipt Number)/i) ||
                      orderId;
     
     // Receipt Number: CGU9REIHHB (from Transaction Details table)
-    const receiptNumber = extractValue(pdfText, /CGU9REIHHB/i) ||
-                         extractValue(pdfText, /(CGU[A-Z0-9]+)/i) ||
-                         'CGU9REIHHB';
+    const receiptNumber = extractValue(pdfText, /(CGU[A-Z0-9]+)/i);
     
     // Transaction Date: 2025-07-30 17:57 (from Transaction Details table)
-    const transactionDate = extractValue(pdfText, /(2025-07-30\s+17:57)/i) ||
-                           extractValue(pdfText, /(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/i) ||
-                           '2025-07-30 17:57';
+    const transactionDate = extractValue(pdfText, /(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/i);
     
     // Amount: 73000.00 (from Transaction Details table)
-    const amount = extractValue(pdfText, /(73000\.00)/i) ||
-                  extractValue(pdfText, /([\d,]+\.\d{2})/i) ||
-                  '73000.00';
+    const amount = extractValue(pdfText, /([\d,]+\.\d{2})/i);
     
     // Financial details from the table
     const paidAmount = extractValue(pdfText, /Paid amount[\s\n\r]*([\d,]+\.\d{2})/i) || amount;
@@ -151,10 +138,8 @@ function parseCBEBirrReceipt(pdfText: string): CBEBirrReceipt | null {
     const totalPaidAmount = extractValue(pdfText, /Total Paid Amount[\s\n\r]*([\d,]+\.\d{2})/i) || amount;
     
     // Payment details from bottom section
-    const paymentReason = extractValue(pdfText, /TransferFromBankToMM by Customer to Customer/i) ||
-                         'TransferFromBankToMM by Customer to Customer';
-    const paymentChannel = extractValue(pdfText, /USSD/i) ||
-                          'USSD';
+    const paymentReason = extractValue(pdfText, /Payment Reason[\s\n\r]+([^\n\r]+)/i);
+    const paymentChannel = extractValue(pdfText, /Payment Channel[\s\n\r]+([^\n\r]+)/i);
 
     const receiptData: CBEBirrReceipt = {
       customerName,
