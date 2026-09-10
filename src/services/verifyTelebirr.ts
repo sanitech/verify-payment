@@ -1,4 +1,4 @@
-import axios, { AxiosError } from "axios";
+import axios, { AxiosError, AxiosProxyConfig } from "axios";
 import * as cheerio from "cheerio";
 import puppeteer, { Browser } from "puppeteer-core";
 import logger from '../utils/logger';
@@ -20,6 +20,56 @@ const VERIFY_RETRY_DELAY_MS = parseInt(process.env.VERIFY_RETRY_DELAY_MS || "150
 
 function delay(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ── Bright Data residential proxy (Ethiopian ISP IPs) ──
+// Built lazily at call time so Vercel env vars are loaded before use.
+function buildBrightDataProxy(): AxiosProxyConfig | undefined {
+    const fullUrl = process.env.BRIGHT_DATA_URL;
+    if (fullUrl) {
+        try {
+            const u = new URL(fullUrl);
+            if (!u.username || !u.password) {
+                logger.warn("BRIGHT_DATA_URL is missing username/password. Bright Data proxy disabled.");
+                return undefined;
+            }
+            return {
+                protocol: u.protocol.replace(":", "") || "http",
+                host: u.hostname,
+                port: parseInt(u.port || "22225", 10),
+                auth: {
+                    username: decodeURIComponent(u.username),
+                    password: decodeURIComponent(u.password),
+                },
+            };
+        } catch (err) {
+            logger.warn("Invalid BRIGHT_DATA_URL. Bright Data proxy disabled.", err);
+            return undefined;
+        }
+    }
+
+    const host = process.env.BRIGHT_DATA_HOST;
+    const port = parseInt(process.env.BRIGHT_DATA_PORT || "22225", 10);
+    let username = process.env.BRIGHT_DATA_USERNAME;
+    const password = process.env.BRIGHT_DATA_PASSWORD;
+
+    if (!host || !username || !password) {
+        return undefined;
+    }
+
+    // Country targeting keys the request to Ethiopian residential IPs.
+    const country = (process.env.BRIGHT_DATA_COUNTRY || "et").trim();
+    if (country && !username.includes("-country-")) {
+        username = `${username}-country-${country}`;
+    }
+
+    // Optional sticky session to avoid rotating mid-verification.
+    const session = (process.env.BRIGHT_DATA_SESSION || "").trim();
+    if (session && !username.includes("-session-")) {
+        username = `${username}-session-${session}`;
+    }
+
+    return { protocol: "http", host, port, auth: { username, password } };
 }
 
 // ── Puppeteer shared browser singleton (lazy-init, reused across requests) ──
@@ -413,7 +463,11 @@ async function fetchFromPrimarySource(reference: string, baseUrl: string): Promi
 
     try {
         logger.info(`Attempting to fetch Telebirr receipt from primary source: ${url}`);
-        const response = await axios.get(url, { timeout: 60000 }); // 60 second timeout
+        const proxy = buildBrightDataProxy();
+        if (proxy) {
+            logger.info(`Using Bright Data residential proxy (${proxy.host}:${proxy.port}) for ${url}`);
+        }
+        const response = await axios.get(url, { timeout: 60000, proxy }); // 60 second timeout
         logger.debug(`Received response with status: ${response.status}`);
 
         const extractedData = scrapeTelebirrReceipt(response.data);
@@ -494,6 +548,56 @@ async function fetchFromPuppeteer(reference: string, baseUrl: string): Promise<T
         if (page) {
             try { await page.close(); } catch { /* ignore */ }
         }
+    }
+}
+
+/**
+ * Fetches Telebirr receipt HTML via Bright Data Web Unlocker API.
+ * Uses an Ethiopian exit IP (country=et) so Telebirr doesn't block the request.
+ * Requires BRIGHT_DATA_UNLOCKER_TOKEN and BRIGHT_DATA_UNLOCKER_ZONE env vars.
+ */
+async function fetchFromWebUnlocker(reference: string, baseUrl: string): Promise<TelebirrReceipt | null> {
+    const token = process.env.BRIGHT_DATA_UNLOCKER_TOKEN;
+    const zone = process.env.BRIGHT_DATA_UNLOCKER_ZONE;
+    const country = process.env.BRIGHT_DATA_UNLOCKER_COUNTRY || "et";
+    if (!token || !zone) return null;
+
+    const url = `${baseUrl}${reference}`;
+
+    try {
+        logger.info(`Attempting to fetch Telebirr receipt via Bright Data Web Unlocker (country=${country}): ${url}`);
+        const response = await axios.post(
+            "https://api.brightdata.com/request",
+            { zone, url, country, format: "raw" },
+            {
+                timeout: 90000,
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            }
+        );
+
+        if (typeof response.data !== "string") {
+            logger.warn("Web Unlocker returned a non-HTML response.", response.data);
+            return null;
+        }
+
+        if (!response.data || response.data.length < 100 || /This request is not correct/i.test(response.data)) {
+            logger.warn(`Web Unlocker returned an invalid/rejected response for reference: ${reference}`);
+            return null;
+        }
+
+        const extractedData = scrapeTelebirrReceipt(response.data);
+
+        logger.info(`Successfully extracted Telebirr data via Web Unlocker for reference: ${reference}`, {
+            receiptNo: extractedData.receiptNo,
+            payerName: extractedData.payerName,
+            transactionStatus: extractedData.transactionStatus,
+        });
+
+        return extractedData;
+    } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : "Unknown error";
+        logger.error(`Web Unlocker fetch failed for reference ${reference}:`, { error: errorMessage });
+        return null;
     }
 }
 
@@ -608,6 +712,16 @@ export async function verifyTelebirr(reference: string): Promise<TelebirrReceipt
         "https://payment-verify.pinael.com/verify-telebirr";
 
     const skipPrimary = process.env.SKIP_PRIMARY_VERIFICATION === "true";
+
+    // Step 0: Bright Data Web Unlocker (Ethiopian exit IP) — preferred when enabled.
+    if (process.env.BRIGHT_DATA_UNLOCKER_TOKEN && process.env.BRIGHT_DATA_UNLOCKER_ZONE) {
+        const unlockerResult = await attemptFetch(fetchFromWebUnlocker, reference, primaryUrl, "bright data web unlocker");
+        if (unlockerResult && isValidReceipt(unlockerResult)) {
+            logger.info(`Successfully verified Telebirr receipt via Bright Data Web Unlocker for reference: ${reference}`);
+            return unlockerResult;
+        }
+        logger.warn(`Bright Data Web Unlocker verification failed for reference: ${reference}. Trying remaining methods...`);
+    }
 
     // Step 1: Direct axios fetch
     if (!skipPrimary) {

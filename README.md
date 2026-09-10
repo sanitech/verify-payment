@@ -421,6 +421,24 @@ NODE_ENV=development # or production
 LOG_LEVEL=info       # or debug, error
 MISTRAL_API_KEY=your_mistral_api_key # Optional: Required for image OCR functionality
 SKIP_PRIMARY_VERIFICATION=false      # Set to true to bypass primary fetch
+
+# Bright Data Web Unlocker (recommended) — routes the primary Telebirr fetch through
+# an Ethiopian exit IP (country=et). Proved to reach Telebirr. Pay-per-request.
+BRIGHT_DATA_UNLOCKER_TOKEN=your_account_api_key
+BRIGHT_DATA_UNLOCKER_ZONE=web_unlocker1
+BRIGHT_DATA_UNLOCKER_COUNTRY=et
+
+# Bright Data residential proxy (optional) — routes the primary Telebirr fetch
+# through Ethiopian residential IPs so Telebirr doesn't block/403 foreign IPs.
+# Simplest form (everything inline):
+BRIGHT_DATA_URL=http://brd-customer-XXXX-zone-YYYY-country-et:PASSWORD@brd.superproxy.io:22225
+# ...or separate parts:
+# BRIGHT_DATA_HOST=brd.superproxy.io
+# BRIGHT_DATA_PORT=22225
+# BRIGHT_DATA_USERNAME=brd-customer-XXXX-zone-YYYY
+# BRIGHT_DATA_PASSWORD=your_zone_password
+# BRIGHT_DATA_COUNTRY=et
+# BRIGHT_DATA_SESSION=verifyapi   # optional sticky session
 ```
 
 You can get an API key for Mistral AI from [https://mistral.ai/](https://mistral.ai/)
