@@ -262,6 +262,17 @@ Verify a payment by uploading an image of the receipt. This endpoint supports bo
 **Request Body:**
 Multipart form-data with an image file.
 
+**JSON alternative (base64):** `POST /verify-image` with `Content-Type: application/json`
+```json
+{
+  "image": "data:image/png;base64,<BASE64_DATA>"
+}
+```
+- `image` — base64 string, optionally prefixed with a `data:<mime>;base64,` data-URI
+- `mimeType` (optional) — overrides detected type, e.g. `image/webp`
+- `fileName` (optional)
+- `suffix` (optional) — required when `autoVerify=true` and the receipt is CBE
+
 - Optional Query Param: `?autoVerify=true`  
   When enabled, the system detects the receipt type and routes it to the correct verification flow automatically.
 - **Note**: If the auto-detected receipt is from CBE, the request **must** include your `Suffix` (last 8 digits of your account).

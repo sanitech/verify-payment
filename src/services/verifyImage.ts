@@ -26,17 +26,36 @@ export const verifyImageHandler = [
             const autoVerify = req.query.autoVerify === "true";
             const accountSuffix = req.body?.suffix || null;
 
-            if (!req.file) {
-                logger.warn("No file uploaded");
-                res.status(400).json({ error: "No file uploaded" });
+            let imageBuffer: Buffer | null = null;
+            let originalName = "image";
+            let mimeType = "application/octet-stream";
+            let fileSize = 0;
+
+            if (req.file) {
+                imageBuffer = req.file.buffer || fs.readFileSync(req.file.path);
+                originalName = req.file.originalname;
+                mimeType = req.file.mimetype;
+                fileSize = req.file.size;
+            } else if (req.body?.image) {
+                const b64 = String(req.body.image);
+                const dataUriMatch = b64.match(/^data:([^;,]+);base64,(.*)$/s);
+                const payload = dataUriMatch ? dataUriMatch[2] : b64.replace(/\s+/g, "");
+                if (dataUriMatch) mimeType = dataUriMatch[1];
+                if (req.body?.mimeType) mimeType = String(req.body.mimeType);
+                imageBuffer = Buffer.from(payload, "base64");
+                originalName = req.body?.fileName || "base64_image";
+                fileSize = imageBuffer.length;
+            }
+
+            if (!imageBuffer || fileSize === 0) {
+                logger.warn("No file or image data uploaded");
+                res.status(400).json({
+                    error: "No file or image data uploaded. Send multipart 'file' upload or JSON body { image: \"<base64 or data URI>\" }.",
+                });
                 return;
             }
 
-            const imageBuffer = req.file.buffer || fs.readFileSync(req.file.path);
-            const fileSize = req.file.size;
-            const mimeType = req.file.mimetype;
-
-            logger.info(`Image uploaded: ${req.file.originalname}, Size: ${fileSize} bytes, Type: ${mimeType}`);
+            logger.info(`Image received: ${originalName}, Size: ${fileSize} bytes, Type: ${mimeType}`);
 
             // Check if Mistral AI is available for OCR
             if (!client) {
@@ -45,7 +64,7 @@ export const verifyImageHandler = [
                     success: true,
                     message: "Image uploaded successfully. OCR analysis is currently disabled.",
                     fileInfo: {
-                        originalName: req.file.originalname,
+                        originalName,
                         size: fileSize,
                         mimeType: mimeType,
                         uploadedAt: new Date().toISOString()
