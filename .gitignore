@@ -6,3 +6,5 @@ logs/
 bun.lockb
 bun.lock
 pnpm-lock.yaml
+.wrangler-tmp
+.wrangler

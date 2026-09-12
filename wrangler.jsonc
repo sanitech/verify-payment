@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "verify-payment",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "CLOUDFLARE_RUNTIME": "true"
+  },
+  "alias": {
+    "puppeteer-core": "./src/cf-stubs/puppeteer-core.ts",
+    "pdf-parse": "./src/cf-stubs/pdf-parse.ts"
+  }
+}

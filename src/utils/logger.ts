@@ -42,7 +42,7 @@ const fileFormat = printf(({ level, message, timestamp, stack, ...meta }) => {
     return log;
 });
 
-const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
+const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.CLOUDFLARE_RUNTIME === "true";
 
 const fileTransports: any[] = [];
 if (!isServerless) {

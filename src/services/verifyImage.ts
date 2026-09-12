@@ -9,7 +9,7 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
+const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.CLOUDFLARE_RUNTIME === "true";
 const storage = isServerless ? multer.memoryStorage() : multer.diskStorage({ destination: "uploads/" });
 const upload = multer({ storage });
 

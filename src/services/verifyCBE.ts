@@ -47,6 +47,11 @@ export async function verifyCBE(
     } catch (directErr: any) {
         logger.warn('⚠️ Direct fetch failed, falling back to Puppeteer:', directErr.message);
 
+        if (process.env.CLOUDFLARE_RUNTIME === "true") {
+            logger.warn("Puppeteer is not available on Cloudflare Workers runtime. Skipping fallback.");
+            return { success: false, error: `Direct fetch failed and Puppeteer is unavailable on this runtime: ${directErr.message}` };
+        }
+
         let browser;
         try {
             browser = await puppeteer.launch({

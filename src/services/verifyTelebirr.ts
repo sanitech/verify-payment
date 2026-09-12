@@ -1,6 +1,7 @@
 import axios, { AxiosError, AxiosProxyConfig } from "axios";
 import * as cheerio from "cheerio";
 import puppeteer, { Browser } from "puppeteer-core";
+import fs from "fs";
 import logger from '../utils/logger';
 
 /** Thrown when the Telebirr proxy returns 502/503/504 (gateway timeout or unavailable). */
@@ -74,11 +75,11 @@ function buildBrightDataProxy(): AxiosProxyConfig | undefined {
 
 // ── Puppeteer shared browser singleton (lazy-init, reused across requests) ──
 
-import { execSync } from "child_process";
-
 let sharedBrowser: Browser | null = null;
 
-function findChromiumPath(): string | undefined {
+const isCloudflareRuntime = process.env.CLOUDFLARE_RUNTIME === "true";
+
+async function findChromiumPath(): Promise<string | undefined> {
     // 1. Explicit env var takes priority
     if (process.env.PUPPETEER_EXECUTABLE_PATH) return process.env.PUPPETEER_EXECUTABLE_PATH;
 
@@ -90,11 +91,12 @@ function findChromiumPath(): string | undefined {
         "/usr/bin/google-chrome-stable",
     ];
     for (const p of candidates) {
-        try { require("fs").accessSync(p); return p; } catch {}
+        try { fs.accessSync(p); return p; } catch {}
     }
 
     // 3. Try `which chromium`
     try {
+        const { execSync } = await import("child_process");
         return execSync("which chromium 2>/dev/null || which chromium-browser 2>/dev/null", { encoding: "utf-8" }).trim();
     } catch {}
 
@@ -106,7 +108,7 @@ async function getBrowser(): Promise<Browser> {
         return sharedBrowser;
     }
 
-    const executablePath = findChromiumPath();
+    const executablePath = await findChromiumPath();
     logger.info("Launching shared Puppeteer browser instance...", { executablePath: executablePath || "(default)" });
 
     sharedBrowser = await puppeteer.launch({
@@ -510,6 +512,11 @@ async function fetchFromPrimarySource(reference: string, baseUrl: string): Promi
  * Uses the shared browser singleton and blocks images/CSS/fonts for speed.
  */
 async function fetchFromPuppeteer(reference: string, baseUrl: string): Promise<TelebirrReceipt | null> {
+    if (isCloudflareRuntime) {
+        logger.warn("Puppeteer is not available on Cloudflare Workers runtime. Skipping.");
+        return null;
+    }
+
     const url = `${baseUrl}${reference}`;
     let page;
     try {
@@ -733,12 +740,16 @@ export async function verifyTelebirr(reference: string): Promise<TelebirrReceipt
     }
 
     // Step 2: Puppeteer fallback (shared browser, blocked resources)
-    const puppeteerResult = await attemptFetch(fetchFromPuppeteer, reference, primaryUrl, "puppeteer");
-    if (puppeteerResult && isValidReceipt(puppeteerResult)) {
-        logger.info(`Successfully verified Telebirr receipt via Puppeteer for reference: ${reference}`);
-        return puppeteerResult;
+    if (!isCloudflareRuntime) {
+        const puppeteerResult = await attemptFetch(fetchFromPuppeteer, reference, primaryUrl, "puppeteer");
+        if (puppeteerResult && isValidReceipt(puppeteerResult)) {
+            logger.info(`Successfully verified Telebirr receipt via Puppeteer for reference: ${reference}`);
+            return puppeteerResult;
+        }
+        logger.warn(`Puppeteer verification failed for reference: ${reference}. Trying fallback proxy...`);
+    } else {
+        logger.info("Skipping Puppeteer step (Cloudflare runtime).");
     }
-    logger.warn(`Puppeteer verification failed for reference: ${reference}. Trying fallback proxy...`);
 
     // Step 3: Fallback proxy
     const fallbackResult = await attemptFetch(fetchFromProxySource, reference, fallbackUrl, "fallback proxy");
