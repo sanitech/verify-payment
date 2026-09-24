@@ -1,5 +1,6 @@
 import axios from "axios";
 import * as cheerio from "cheerio";
+import { buildBrightDataProxy } from "../utils/brightData";
 
 export type EbirrWallet = "kaafimf" | "coopay";
 
@@ -129,7 +130,7 @@ function parseReceipt(html: string, sourceWallet: EbirrWallet, token: string): E
 
 async function fetchAndParse(wallet: EbirrWallet, token: string): Promise<EbirrReceipt> {
   const url = `https://receipt.ebirr.com/${wallet}/${token}`;
-  const response = await axios.get(url, { timeout: 15000, validateStatus: () => true });
+  const response = await axios.get(url, { timeout: 15000, validateStatus: () => true, proxy: buildBrightDataProxy() });
   if (response.status < 200 || response.status >= 300 || typeof response.data !== "string") {
     throw new Error(`eBirr returned HTTP ${response.status}`);
   }
