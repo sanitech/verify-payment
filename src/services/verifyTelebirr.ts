@@ -23,6 +23,42 @@ function delay(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ── In-process receipt cache ──
+// Confirmed Telebirr receipts are immutable, so repeated verification of the
+// same reference ("did this payment clear?") can be served from cache instead
+// of burning another paid Web Unlocker request. Memory is bounded and TTL is
+// short enough that long-running instances never serve stale "pending" data.
+const TELEBIRR_CACHE_TTL_MS = parseInt(process.env.TELEBIRR_CACHE_TTL_MS || String(24 * 60 * 60 * 1000), 10);
+const TELEBIRR_CACHE_MAX = 500;
+
+interface CacheEntry {
+    data: TelebirrReceipt;
+    expiresAt: number;
+}
+
+const receiptCache = new Map<string, CacheEntry>();
+
+// Dedupes concurrent requests for the same reference so a stampede doesn't
+// trigger multiple paid Unlocker calls for the same receipt.
+const inFlight = new Map<string, Promise<TelebirrReceipt | null>>();
+
+function getCachedReceipt(reference: string): TelebirrReceipt | null {
+    const entry = receiptCache.get(reference);
+    if (entry && entry.expiresAt > Date.now()) {
+        return entry.data;
+    }
+    if (entry) receiptCache.delete(reference);
+    return null;
+}
+
+function setCachedReceipt(reference: string, receipt: TelebirrReceipt) {
+    if (receiptCache.size >= TELEBIRR_CACHE_MAX) {
+        const oldestKey = receiptCache.keys().next().value as string | undefined;
+        if (oldestKey) receiptCache.delete(oldestKey);
+    }
+    receiptCache.set(reference, { data: receipt, expiresAt: Date.now() + TELEBIRR_CACHE_TTL_MS });
+}
+
 // ── Bright Data residential proxy (Ethiopian ISP IPs) ──
 // Built lazily at call time so Vercel env vars are loaded before use.
 function buildBrightDataProxy(): AxiosProxyConfig | undefined {
@@ -713,6 +749,33 @@ async function attemptFetch(
 }
 
 export async function verifyTelebirr(reference: string): Promise<TelebirrReceipt | null> {
+    const cached = getCachedReceipt(reference);
+    if (cached) {
+        logger.info(`Serving cached Telebirr receipt for reference: ${reference} (no network call needed)`);
+        return cached;
+    }
+
+    const existing = inFlight.get(reference);
+    if (existing) {
+        logger.info(`Reusing in-flight Telebirr verification for reference: ${reference}`);
+        return existing;
+    }
+
+    const run = (): Promise<TelebirrReceipt | null> => verifyTelebirrUncached(reference);
+    const promise = run();
+    inFlight.set(reference, promise);
+    try {
+        const result = await promise;
+        if (result && isValidReceipt(result)) {
+            setCachedReceipt(reference, result);
+        }
+        return result;
+    } finally {
+        inFlight.delete(reference);
+    }
+}
+
+async function verifyTelebirrUncached(reference: string): Promise<TelebirrReceipt | null> {
     const primaryUrl = "https://transactioninfo.ethiotelecom.et/receipt/";
     const fallbackUrl =
         process.env.TELEBIRR_FALLBACK_URL ||
