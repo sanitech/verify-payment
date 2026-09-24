@@ -1,6 +1,5 @@
 import axios from 'axios';
 import pdfParse from 'pdf-parse';
-import { buildBrightDataProxy } from '../utils/brightData';
 import { VerifyResult } from './verifyCBE';
 import logger from '../utils/logger';
 
@@ -37,7 +36,6 @@ export async function verifyCBEBirr(
     // Fetch the PDF
     const response = await axios.get(url, {
       responseType: 'arraybuffer',
-      proxy: buildBrightDataProxy(),
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       },

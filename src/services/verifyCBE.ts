@@ -4,7 +4,6 @@ import pdf from 'pdf-parse';
 import https from 'https';
 import fs from 'fs';
 import logger from '../utils/logger';
-import { buildBrightDataProxy } from '../utils/brightData';
 
 export interface VerifyResult {
     success: boolean;
@@ -36,7 +35,6 @@ export async function verifyCBE(
         const response: AxiosResponse<ArrayBuffer> = await axios.get(url, {
             httpsAgent,
             responseType: 'arraybuffer',
-            proxy: buildBrightDataProxy(),
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
                 'Accept': 'application/pdf'
@@ -89,8 +87,7 @@ export async function verifyCBE(
 
             const pdfRes = await axios.get(detectedPdfUrl, {
                 httpsAgent,
-                responseType: 'arraybuffer',
-                proxy: buildBrightDataProxy()
+                responseType: 'arraybuffer'
             });
 
             return await parseCBEReceipt(pdfRes.data);

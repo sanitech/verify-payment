@@ -1,7 +1,6 @@
 import axios, { AxiosResponse } from 'axios';
 import pdf from 'pdf-parse';
 import https from 'https';
-import { buildBrightDataProxy } from '../utils/brightData';
 import logger from '../utils/logger';
 
 export interface DashenVerifyResult {
@@ -45,7 +44,6 @@ export async function verifyDashen(
         const response: AxiosResponse<ArrayBuffer> = await axios.get(url, {
             httpsAgent,
             responseType: 'arraybuffer',
-            proxy: buildBrightDataProxy(),
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
                 'Accept': 'application/pdf'

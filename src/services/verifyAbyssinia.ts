@@ -1,6 +1,5 @@
 import axios, { AxiosError } from 'axios';
 import logger from '../utils/logger';
-import { buildBrightDataProxy } from '../utils/brightData';
 import { VerifyResult } from './verifyCBE';
 
 function parseTrxId(trx: string): string {
@@ -20,7 +19,6 @@ export async function verifyAbyssinia(reference: string): Promise<VerifyResult> 
 
         const response = await axios.get(apiUrl, {
             timeout: 30000,
-            proxy: buildBrightDataProxy(),
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Accept': 'application/json, text/plain, */*',
