@@ -81,13 +81,13 @@ async function fetchViaWebUnlocker(trxNo: string): Promise<SafaricomApiResponse>
         throw new Error(`Bright Data HTTP ${response.status}: ${bodyPreview}`);
     }
 
-    let parsed: unknown = response.data;
-    if (typeof parsed === 'string') {
+    const raw = response.data;
+    let parsed: unknown = raw;
+    if (typeof raw === 'string') {
         try {
-            parsed = JSON.parse(parsed);
+            parsed = JSON.parse(raw);
         } catch {
-            const preview = parsed.slice(0, 200);
-            throw new Error(`Web Unlocker returned non-JSON body: ${preview}`);
+            throw new Error(`Web Unlocker returned non-JSON body: ${raw.slice(0, 200)}`);
         }
     }
 
