@@ -35,6 +35,69 @@ export type SafaricomVerifyResult = SafaricomReceipt | SafaricomFailure;
 const RECEIPT_ENDPOINT = 'https://m-pesabusiness.safaricom.et/api/receipt/getReceipt';
 const REFERENCE_RE = /^[A-Z0-9]{6,20}$/;
 
+interface SafaricomApiResponse {
+    responseCode?: string | number;
+    responseDescription?: string;
+    base64Data?: string;
+}
+
+// Bright Data Web Unlocker path: many hosting providers (Vercel, AWS us-east-1)
+// have their egress IPs silently dropped by Safaricom's edge, so a direct fetch
+// hangs until the socket times out. When BRIGHT_DATA_UNLOCKER_TOKEN and
+// BRIGHT_DATA_UNLOCKER_ZONE are configured (same env vars Telebirr uses), route
+// the request through Bright Data's Ethiopian residential IPs instead.
+async function fetchViaWebUnlocker(trxNo: string): Promise<SafaricomApiResponse | null> {
+    const token = process.env.BRIGHT_DATA_UNLOCKER_TOKEN;
+    const zone = process.env.BRIGHT_DATA_UNLOCKER_ZONE;
+    if (!token || !zone) return null;
+    const country = process.env.BRIGHT_DATA_UNLOCKER_COUNTRY || 'et';
+    const url = `${RECEIPT_ENDPOINT}?trxNo=${encodeURIComponent(trxNo)}`;
+
+    try {
+        logger.info(`Fetching Safaricom receipt via Bright Data Web Unlocker (country=${country}): ${url}`);
+        const response = await axios.post(
+            'https://api.brightdata.com/request',
+            { zone, url, country, format: 'raw' },
+            {
+                timeout: 25000,
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`,
+                },
+            }
+        );
+
+        if (typeof response.data === 'string') {
+            try {
+                return JSON.parse(response.data);
+            } catch {
+                logger.warn('Web Unlocker returned non-JSON body for Safaricom endpoint');
+                return null;
+            }
+        }
+        if (response.data && typeof response.data === 'object') {
+            return response.data as SafaricomApiResponse;
+        }
+        return null;
+    } catch (err) {
+        const msg = err instanceof AxiosError ? `${err.code || err.message}` : String(err);
+        logger.error(`Safaricom Web Unlocker fetch failed: ${msg}`);
+        return null;
+    }
+}
+
+async function fetchDirectly(trxNo: string): Promise<SafaricomApiResponse> {
+    const response = await axios.get(RECEIPT_ENDPOINT, {
+        params: { trxNo },
+        timeout: 25000,
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json',
+        },
+    });
+    return response.data;
+}
+
 // Extracts the M-PESA transaction number from a raw SMS. Sent-money SMSes contain
 // a receipt URL of the form https://m-pesabusiness.safaricom.et/receipt/<ref>, and
 // both sent and received SMSes include "Transaction number [is] <ref>".
@@ -53,45 +116,56 @@ export async function verifySafaricom(reference: string): Promise<SafaricomVerif
         return { success: false, error: 'Invalid Safaricom transaction reference format' };
     }
 
-    try {
-        logger.info(`Starting Safaricom verification for reference: ${trxNo}`);
-        const response = await axios.get(RECEIPT_ENDPOINT, {
-            params: { trxNo },
-            timeout: 30000,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'application/json',
-            },
-        });
+    logger.info(`Starting Safaricom verification for reference: ${trxNo}`);
+    const hasUnlocker = Boolean(process.env.BRIGHT_DATA_UNLOCKER_TOKEN && process.env.BRIGHT_DATA_UNLOCKER_ZONE);
 
-        const { responseCode, responseDescription, base64Data } = response.data || {};
+    let apiResponse: SafaricomApiResponse | null = null;
+    let lastError: string | null = null;
 
-        if (responseCode !== '0' && responseCode !== 0) {
-            return {
-                success: false,
-                error: responseDescription || 'Safaricom API returned an error',
-                responseCode: String(responseCode ?? ''),
-            };
-        }
-
-        if (typeof base64Data !== 'string' || base64Data.length === 0) {
-            return { success: false, error: 'Safaricom API response missing PDF payload' };
-        }
-
-        const pdfBuffer = Buffer.from(base64Data, 'base64');
-        return await parseSafaricomReceipt(pdfBuffer, trxNo);
-    } catch (error) {
-        if (error instanceof AxiosError) {
-            const status = error.response?.status;
-            logger.error(`HTTP error fetching Safaricom receipt (${status ?? 'n/a'}): ${error.message}`);
-            return {
-                success: false,
-                error: `Failed to fetch Safaricom receipt: HTTP ${status ?? 'unknown'}`,
-            };
-        }
-        logger.error('Unexpected error in verifySafaricom:', error);
-        return { success: false, error: 'Failed to verify Safaricom transaction' };
+    if (hasUnlocker) {
+        apiResponse = await fetchViaWebUnlocker(trxNo);
+        if (!apiResponse) lastError = 'Web Unlocker request failed';
     }
+
+    if (!apiResponse) {
+        try {
+            apiResponse = await fetchDirectly(trxNo);
+        } catch (error) {
+            if (error instanceof AxiosError) {
+                const status = error.response?.status;
+                const detail = error.code || (status ? `HTTP ${status}` : 'network error');
+                logger.error(`Direct Safaricom fetch failed (${detail}): ${error.message}`);
+                lastError = `${detail}${error.message ? ` — ${error.message}` : ''}`;
+            } else {
+                logger.error('Unexpected error in direct Safaricom fetch:', error);
+                lastError = error instanceof Error ? error.message : 'unknown error';
+            }
+        }
+    }
+
+    if (!apiResponse) {
+        return {
+            success: false,
+            error: `Failed to fetch Safaricom receipt: ${lastError || 'unknown error'}`,
+        };
+    }
+
+    const { responseCode, responseDescription, base64Data } = apiResponse;
+
+    if (responseCode !== '0' && responseCode !== 0) {
+        return {
+            success: false,
+            error: responseDescription || 'Safaricom API returned an error',
+            responseCode: String(responseCode ?? ''),
+        };
+    }
+
+    if (typeof base64Data !== 'string' || base64Data.length === 0) {
+        return { success: false, error: 'Safaricom API response missing PDF payload' };
+    }
+
+    const pdfBuffer = Buffer.from(base64Data, 'base64');
+    return parseSafaricomReceipt(pdfBuffer, trxNo);
 }
 
 export async function verifySafaricomText(text: string): Promise<SafaricomVerifyResult> {
