@@ -1,0 +1,169 @@
+import axios, { AxiosError } from 'axios';
+import pdf from 'pdf-parse';
+import logger from '../utils/logger';
+
+export interface SafaricomReceipt {
+    success: true;
+    reference: string;
+    receiptNo?: string;
+    senderName?: string;
+    senderPhone?: string;
+    senderTin?: string;
+    receiverName?: string;
+    receiverPhone?: string;
+    paymentMethod?: string;
+    transactionType?: string;
+    paymentChannel?: string;
+    paymentReason?: string | null;
+    amount?: number;
+    serviceFee?: number;
+    vat?: number;
+    total?: number;
+    amountInWords?: string;
+    date?: Date;
+    institution?: string;
+}
+
+export interface SafaricomFailure {
+    success: false;
+    error: string;
+    responseCode?: string;
+}
+
+export type SafaricomVerifyResult = SafaricomReceipt | SafaricomFailure;
+
+const RECEIPT_ENDPOINT = 'https://m-pesabusiness.safaricom.et/api/receipt/getReceipt';
+const REFERENCE_RE = /^[A-Z0-9]{6,20}$/;
+
+// Extracts the M-PESA transaction number from a raw SMS. Sent-money SMSes contain
+// a receipt URL of the form https://m-pesabusiness.safaricom.et/receipt/<ref>, and
+// both sent and received SMSes include "Transaction number [is] <ref>".
+export function extractSafaricomReference(text: string): string | null {
+    if (!text) return null;
+    const urlMatch = text.match(/m-pesabusiness\.safaricom\.et\/receipt\/([A-Z0-9]{6,20})/i);
+    if (urlMatch) return urlMatch[1].toUpperCase();
+    const inlineMatch = text.match(/Transaction\s+number\s+(?:is\s+)?([A-Z0-9]{6,20})/i);
+    if (inlineMatch) return inlineMatch[1].toUpperCase();
+    return null;
+}
+
+export async function verifySafaricom(reference: string): Promise<SafaricomVerifyResult> {
+    const trxNo = (reference || '').trim().toUpperCase();
+    if (!REFERENCE_RE.test(trxNo)) {
+        return { success: false, error: 'Invalid Safaricom transaction reference format' };
+    }
+
+    try {
+        logger.info(`Starting Safaricom verification for reference: ${trxNo}`);
+        const response = await axios.get(RECEIPT_ENDPOINT, {
+            params: { trxNo },
+            timeout: 30000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json',
+            },
+        });
+
+        const { responseCode, responseDescription, base64Data } = response.data || {};
+
+        if (responseCode !== '0' && responseCode !== 0) {
+            return {
+                success: false,
+                error: responseDescription || 'Safaricom API returned an error',
+                responseCode: String(responseCode ?? ''),
+            };
+        }
+
+        if (typeof base64Data !== 'string' || base64Data.length === 0) {
+            return { success: false, error: 'Safaricom API response missing PDF payload' };
+        }
+
+        const pdfBuffer = Buffer.from(base64Data, 'base64');
+        return await parseSafaricomReceipt(pdfBuffer, trxNo);
+    } catch (error) {
+        if (error instanceof AxiosError) {
+            const status = error.response?.status;
+            logger.error(`HTTP error fetching Safaricom receipt (${status ?? 'n/a'}): ${error.message}`);
+            return {
+                success: false,
+                error: `Failed to fetch Safaricom receipt: HTTP ${status ?? 'unknown'}`,
+            };
+        }
+        logger.error('Unexpected error in verifySafaricom:', error);
+        return { success: false, error: 'Failed to verify Safaricom transaction' };
+    }
+}
+
+export async function verifySafaricomText(text: string): Promise<SafaricomVerifyResult> {
+    const reference = extractSafaricomReference(text);
+    if (!reference) {
+        return { success: false, error: 'Could not find an M-PESA transaction number in the provided text' };
+    }
+    return verifySafaricom(reference);
+}
+
+async function parseSafaricomReceipt(buffer: Buffer, reference: string): Promise<SafaricomVerifyResult> {
+    try {
+        const parsed = await pdf(buffer);
+        const text = parsed.text;
+
+        const trxIdMatch = text.match(/\/\s*TRANSACTION ID\s*\r?\n([A-Z0-9]+)/i);
+        const rowMatch = text.match(/([A-Z0-9]{8,})(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})([\d,]+\.\d{2})/);
+        const senderNameMatch = text.match(/\/\s*SENDER NAME\s*\r?\n([^\r\n]+)/i);
+        const senderPhoneMatch = text.match(/\/\s*SENDER PHONE NUMBER\s*\r?\n(\d+)/i);
+        const senderTinMatch = text.match(/\/\s*SENDER TIN NO\s*\r?\n([^\r\n]+)/i);
+        const receiverNameMatch = text.match(/\/\s*RECEIVER NAME\s*\r?\n([^\r\n]+)/i);
+        const receiverPhoneMatch = text.match(/(\d{9,15})\r?\n\/\s*TRANSACTION ID/i);
+        const paymentMethodMatch = text.match(/\/\s*PAYMENT METHOD\s*\r?\n([^\r\n]+)/i);
+        const typeChannelMatch = text.match(/\/\s*TRANSACTION TYPE\s*\r?\n\/\s*PAYMENT CHANNEL\s*\r?\n([^\r\n]+)\r?\n([^\r\n]+)/i);
+        const paymentReasonMatch = text.match(/\/\s*PAYMENT REASON\s*\r?\n([^\r\n]+)/i);
+        const totalMatch = text.match(/\/\s*TOTAL\s*\r?\n([\d,]+\.\d{2})/i);
+        const wordsMatch = text.match(/\/\s*TOTAL AMOUNT IN WORDS\s*\r?\n([\s\S]+?)\r?\n\s*\/\s*TOTAL/i);
+        const feeVatMatch = text.match(/([\d,]+\.\d{2})\s*Birr\s*\r?\n([\d,]+\.\d{2})\s*Birr\s*\r?\n\s*\/\s*SERVICE FEE/i);
+        const institutionMatch = text.match(/[+\d][\d \-]{6,}\r?\n([^\r\n\/]+)\r?\nየላኪ ስም/);
+
+        const toNum = (s: string | undefined) => (s ? parseFloat(s.replace(/,/g, '')) : undefined);
+        const cleanReason = (s: string | undefined) => {
+            if (!s) return null;
+            const trimmed = s.trim();
+            return trimmed && trimmed !== '- - -' ? trimmed : null;
+        };
+
+        const trxId = trxIdMatch?.[1]?.trim() || reference;
+        const receiptNo = rowMatch?.[1]?.trim();
+        const dateRaw = rowMatch?.[2]?.trim();
+        const amount = toNum(rowMatch?.[3]);
+        const date = dateRaw ? new Date(dateRaw.replace(' ', 'T')) : undefined;
+
+        const result: SafaricomReceipt = {
+            success: true,
+            reference: trxId,
+            receiptNo,
+            senderName: senderNameMatch?.[1]?.trim(),
+            senderPhone: senderPhoneMatch?.[1]?.trim(),
+            senderTin: cleanReason(senderTinMatch?.[1]) || undefined,
+            receiverName: receiverNameMatch?.[1]?.trim(),
+            receiverPhone: receiverPhoneMatch?.[1]?.trim(),
+            paymentMethod: paymentMethodMatch?.[1]?.trim(),
+            transactionType: typeChannelMatch?.[1]?.trim(),
+            paymentChannel: typeChannelMatch?.[2]?.trim(),
+            paymentReason: cleanReason(paymentReasonMatch?.[1]),
+            amount,
+            serviceFee: toNum(feeVatMatch?.[1]),
+            vat: toNum(feeVatMatch?.[2]),
+            total: toNum(totalMatch?.[1]) ?? amount,
+            amountInWords: wordsMatch?.[1]?.replace(/\s+/g, ' ').trim(),
+            date,
+            institution: institutionMatch?.[1]?.trim(),
+        };
+
+        if (!result.reference || result.amount === undefined) {
+            return { success: false, error: 'Could not extract required fields from Safaricom PDF' };
+        }
+
+        return result;
+    } catch (err) {
+        logger.error('Failed to parse Safaricom receipt PDF:', err);
+        return { success: false, error: 'Error parsing Safaricom receipt PDF' };
+    }
+}

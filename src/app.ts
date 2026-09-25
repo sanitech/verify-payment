@@ -7,6 +7,7 @@ import dashenRouter from './routes/verifyDashenRoute';
 import abyssiniaRouter from './routes/verifyAbyssiniaRoute';
 import cbebirrRouter from './routes/verifyCBEBirrRoute';
 import ebirrRouter from './routes/verifyEbirrRoute';
+import safaricomRouter from './routes/verifySafaricomRoute';
 import logger from './utils/logger';
 import { verifyImageHandler } from './services/verifyImage';
 import { requestLogger } from './middleware/requestLogger';
@@ -44,6 +45,7 @@ app.use('/verify-dashen', dashenRouter);
 app.use('/verify-abyssinia', abyssiniaRouter);
 app.use('/verify-cbebirr', cbebirrRouter);
 app.use('/verify-ebirr', ebirrRouter);
+app.use('/verify-safaricom', safaricomRouter);
 app.post('/verify-image', verifyImageHandler);
 
 // Health check endpoint
@@ -63,6 +65,7 @@ app.get('/', (req: Request, res: Response) => {
       '/verify-abyssinia',
       '/verify-cbebirr',
       '/verify-ebirr',
+      '/verify-safaricom',
       '/verify-image'
     ]
   });
