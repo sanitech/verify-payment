@@ -120,11 +120,18 @@ export async function verifySafaricom(reference: string): Promise<SafaricomVerif
     const hasUnlocker = Boolean(process.env.BRIGHT_DATA_UNLOCKER_TOKEN && process.env.BRIGHT_DATA_UNLOCKER_ZONE);
 
     let apiResponse: SafaricomApiResponse | null = null;
-    let lastError: string | null = null;
+    let unlockerError: string | null = null;
+    let directError: string | null = null;
 
     if (hasUnlocker) {
-        apiResponse = await fetchViaWebUnlocker(trxNo);
-        if (!apiResponse) lastError = 'Web Unlocker request failed';
+        try {
+            apiResponse = await fetchViaWebUnlocker(trxNo);
+            if (!apiResponse) unlockerError = 'Web Unlocker returned no usable response';
+        } catch (err) {
+            unlockerError = err instanceof Error ? err.message : String(err);
+        }
+    } else {
+        unlockerError = 'Bright Data Web Unlocker not configured (BRIGHT_DATA_UNLOCKER_TOKEN / BRIGHT_DATA_UNLOCKER_ZONE missing)';
     }
 
     if (!apiResponse) {
@@ -135,18 +142,21 @@ export async function verifySafaricom(reference: string): Promise<SafaricomVerif
                 const status = error.response?.status;
                 const detail = error.code || (status ? `HTTP ${status}` : 'network error');
                 logger.error(`Direct Safaricom fetch failed (${detail}): ${error.message}`);
-                lastError = `${detail}${error.message ? ` — ${error.message}` : ''}`;
+                directError = `${detail}${error.message ? ` — ${error.message}` : ''}`;
             } else {
                 logger.error('Unexpected error in direct Safaricom fetch:', error);
-                lastError = error instanceof Error ? error.message : 'unknown error';
+                directError = error instanceof Error ? error.message : 'unknown error';
             }
         }
     }
 
     if (!apiResponse) {
+        const parts: string[] = [];
+        if (unlockerError) parts.push(`unlocker: ${unlockerError}`);
+        if (directError) parts.push(`direct: ${directError}`);
         return {
             success: false,
-            error: `Failed to fetch Safaricom receipt: ${lastError || 'unknown error'}`,
+            error: `Failed to fetch Safaricom receipt (${parts.join('; ') || 'unknown error'})`,
         };
     }
 
