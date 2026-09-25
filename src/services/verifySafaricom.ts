@@ -46,16 +46,16 @@ interface SafaricomApiResponse {
 // hangs until the socket times out. When BRIGHT_DATA_UNLOCKER_TOKEN and
 // BRIGHT_DATA_UNLOCKER_ZONE are configured (same env vars Telebirr uses), route
 // the request through Bright Data's Ethiopian residential IPs instead.
-async function fetchViaWebUnlocker(trxNo: string): Promise<SafaricomApiResponse | null> {
-    const token = process.env.BRIGHT_DATA_UNLOCKER_TOKEN;
-    const zone = process.env.BRIGHT_DATA_UNLOCKER_ZONE;
-    if (!token || !zone) return null;
+async function fetchViaWebUnlocker(trxNo: string): Promise<SafaricomApiResponse> {
+    const token = process.env.BRIGHT_DATA_UNLOCKER_TOKEN!;
+    const zone = process.env.BRIGHT_DATA_UNLOCKER_ZONE!;
     const country = process.env.BRIGHT_DATA_UNLOCKER_COUNTRY || 'et';
     const url = `${RECEIPT_ENDPOINT}?trxNo=${encodeURIComponent(trxNo)}`;
 
+    logger.info(`Fetching Safaricom receipt via Bright Data Web Unlocker (country=${country}): ${url}`);
+    let response;
     try {
-        logger.info(`Fetching Safaricom receipt via Bright Data Web Unlocker (country=${country}): ${url}`);
-        const response = await axios.post(
+        response = await axios.post(
             'https://api.brightdata.com/request',
             { zone, url, country, format: 'raw' },
             {
@@ -64,26 +64,38 @@ async function fetchViaWebUnlocker(trxNo: string): Promise<SafaricomApiResponse 
                     'Content-Type': 'application/json',
                     Authorization: `Bearer ${token}`,
                 },
+                validateStatus: () => true,
             }
         );
-
-        if (typeof response.data === 'string') {
-            try {
-                return JSON.parse(response.data);
-            } catch {
-                logger.warn('Web Unlocker returned non-JSON body for Safaricom endpoint');
-                return null;
-            }
-        }
-        if (response.data && typeof response.data === 'object') {
-            return response.data as SafaricomApiResponse;
-        }
-        return null;
     } catch (err) {
-        const msg = err instanceof AxiosError ? `${err.code || err.message}` : String(err);
-        logger.error(`Safaricom Web Unlocker fetch failed: ${msg}`);
-        return null;
+        if (err instanceof AxiosError) {
+            throw new Error(`Bright Data request failed: ${err.code || err.message}`);
+        }
+        throw err;
     }
+
+    if (response.status >= 400) {
+        const bodyPreview = typeof response.data === 'string'
+            ? response.data.slice(0, 200)
+            : JSON.stringify(response.data).slice(0, 200);
+        throw new Error(`Bright Data HTTP ${response.status}: ${bodyPreview}`);
+    }
+
+    let parsed: unknown = response.data;
+    if (typeof parsed === 'string') {
+        try {
+            parsed = JSON.parse(parsed);
+        } catch {
+            const preview = parsed.slice(0, 200);
+            throw new Error(`Web Unlocker returned non-JSON body: ${preview}`);
+        }
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+        throw new Error(`Web Unlocker returned unexpected body type: ${typeof parsed}`);
+    }
+
+    return parsed as SafaricomApiResponse;
 }
 
 async function fetchDirectly(trxNo: string): Promise<SafaricomApiResponse> {
@@ -126,12 +138,12 @@ export async function verifySafaricom(reference: string): Promise<SafaricomVerif
     if (hasUnlocker) {
         try {
             apiResponse = await fetchViaWebUnlocker(trxNo);
-            if (!apiResponse) unlockerError = 'Web Unlocker returned no usable response';
         } catch (err) {
             unlockerError = err instanceof Error ? err.message : String(err);
+            logger.error(`Safaricom Web Unlocker leg failed: ${unlockerError}`);
         }
     } else {
-        unlockerError = 'Bright Data Web Unlocker not configured (BRIGHT_DATA_UNLOCKER_TOKEN / BRIGHT_DATA_UNLOCKER_ZONE missing)';
+        unlockerError = 'not configured (BRIGHT_DATA_UNLOCKER_TOKEN / BRIGHT_DATA_UNLOCKER_ZONE missing)';
     }
 
     if (!apiResponse) {
