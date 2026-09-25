@@ -74,20 +74,36 @@ async function fetchViaWebUnlocker(trxNo: string): Promise<SafaricomApiResponse>
         throw err;
     }
 
-    if (response.status >= 400) {
+    // Diagnostic hints from Bright Data: x-brd-error-code / x-luminati-error tell us
+    // if the request never made it to Safaricom (proxy-level failure), and
+    // x-response-code carries the actual status the target returned.
+    const brdError = response.headers['x-brd-error-code'] || response.headers['x-luminati-error'];
+    const targetStatus = response.headers['x-response-code'] || response.headers['x-brd-status'];
+
+    if (response.status >= 400 || brdError) {
         const bodyPreview = typeof response.data === 'string'
             ? response.data.slice(0, 200)
             : JSON.stringify(response.data).slice(0, 200);
-        throw new Error(`Bright Data HTTP ${response.status}: ${bodyPreview}`);
+        throw new Error(
+            `Bright Data HTTP ${response.status}${brdError ? ` (brd-error=${brdError})` : ''}` +
+            `${targetStatus ? ` (target=${targetStatus})` : ''}: ${bodyPreview || '<empty body>'}`
+        );
     }
 
     const raw = response.data;
+    if (typeof raw === 'string' && raw.length === 0) {
+        throw new Error(
+            `Web Unlocker returned empty body (target=${targetStatus || 'unknown'}` +
+            `${brdError ? `, brd-error=${brdError}` : ''})`
+        );
+    }
+
     let parsed: unknown = raw;
     if (typeof raw === 'string') {
         try {
             parsed = JSON.parse(raw);
         } catch {
-            throw new Error(`Web Unlocker returned non-JSON body: ${raw.slice(0, 200)}`);
+            throw new Error(`Web Unlocker returned non-JSON body (target=${targetStatus || 'unknown'}): ${raw.slice(0, 200)}`);
         }
     }
 
