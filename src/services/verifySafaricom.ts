@@ -244,6 +244,69 @@ export async function verifySafaricomText(text: string): Promise<SafaricomVerify
     return verifySafaricom(reference);
 }
 
+// ── PDF text helpers ──
+// M-PESA receipts come in (at least) two templates: Send Money (P2P) and B2C
+// (bank/business → customer). pdf extraction interleaves Amharic label lines with
+// English ones, and the real value is not always the first line after a label —
+// these helpers grab the first *real* value and skip Ethiopic-only label lines.
+
+// First line after `labelRe` that looks like a real text value (skips Amharic labels).
+function valueAfterLabel(text: string, labelRe: RegExp): string | undefined {
+    const m = labelRe.exec(text);
+    if (!m) return undefined;
+    const after = text.slice(m.index + m[0].length);
+    for (const raw of after.split(/\r?\n/)) {
+        const t = raw.trim();
+        if (!t) continue;
+        if (t.startsWith('/')) return undefined; // next field label -> no value
+        if (!/[A-Za-z]/.test(t)) continue; // Ethiopic/symbol-only label line
+        return t;
+    }
+    return undefined;
+}
+
+// First `123.45` (optionally "Birr") after `labelRe`.
+function numberAfterLabel(text: string, labelRe: RegExp): string | undefined {
+    const m = labelRe.exec(text);
+    if (!m) return undefined;
+    const after = text.slice(m.index + m[0].length);
+    for (const raw of after.split(/\r?\n/)) {
+        const t = raw.trim();
+        if (!t) continue;
+        const num = t.match(/^([\d,]+\.\d{2})/);
+        if (num) return num[1];
+        if (t.startsWith('/')) return undefined;
+    }
+    return undefined;
+}
+
+// First phone-looking integer after `labelRe`.
+function phoneAfterLabel(text: string, labelRe: RegExp): string | undefined {
+    const m = labelRe.exec(text);
+    if (!m) return undefined;
+    const after = text.slice(m.index + m[0].length);
+    for (const raw of after.split(/\r?\n/)) {
+        const t = raw.trim();
+        if (!t) continue;
+        const num = t.match(/^(\d{9,15})/);
+        if (num) return num[1];
+        if (t.startsWith('/')) return undefined;
+    }
+    return undefined;
+}
+
+// Nearest standalone `123.45 [Birr]` line directly ABOVE `labelRe` (fees sit above labels).
+function feeAboveLabel(text: string, labelRe: RegExp): number | undefined {
+    const m = labelRe.exec(text);
+    if (!m) return undefined;
+    const lines = text.slice(0, m.index).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+        const num = lines[i].match(/^([\d,]+\.\d{2})(?:\s*Birr)?$/);
+        if (num) return parseFloat(num[1].replace(/,/g, ''));
+    }
+    return undefined;
+}
+
 async function parseSafaricomReceipt(buffer: Buffer, reference: string): Promise<SafaricomVerifyResult> {
     try {
         const parsed = await pdf(buffer);
@@ -251,25 +314,47 @@ async function parseSafaricomReceipt(buffer: Buffer, reference: string): Promise
 
         const trxIdMatch = text.match(/\/\s*TRANSACTION ID\s*\r?\n([A-Z0-9]+)/i);
         const rowMatch = text.match(/([A-Z0-9]{8,})(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})([\d,]+\.\d{2})/);
-        const senderNameMatch = text.match(/\/\s*SENDER NAME\s*\r?\n([^\r\n]+)/i);
-        const senderPhoneMatch = text.match(/\/\s*SENDER PHONE NUMBER\s*\r?\n(\d+)/i);
-        const senderTinMatch = text.match(/\/\s*SENDER TIN NO\s*\r?\n([^\r\n]+)/i);
-        const receiverNameMatch = text.match(/\/\s*RECEIVER NAME\s*\r?\n([^\r\n]+)/i);
-        const receiverPhoneMatch = text.match(/(\d{9,15})\r?\n\/\s*TRANSACTION ID/i);
-        const paymentMethodMatch = text.match(/\/\s*PAYMENT METHOD\s*\r?\n([^\r\n]+)/i);
-        const typeChannelMatch = text.match(/\/\s*TRANSACTION TYPE\s*\r?\n\/\s*PAYMENT CHANNEL\s*\r?\n([^\r\n]+)\r?\n([^\r\n]+)/i);
-        const paymentReasonMatch = text.match(/\/\s*PAYMENT REASON\s*\r?\n([^\r\n]+)/i);
-        const totalMatch = text.match(/\/\s*TOTAL\s*\r?\n([\d,]+\.\d{2})/i);
-        const wordsMatch = text.match(/\/\s*TOTAL AMOUNT IN WORDS\s*\r?\n([\s\S]+?)\r?\n\s*\/\s*TOTAL/i);
-        const feeVatMatch = text.match(/([\d,]+\.\d{2})\s*Birr\s*\r?\n([\d,]+\.\d{2})\s*Birr\s*\r?\n\s*\/\s*SERVICE FEE/i);
-        const institutionMatch = text.match(/[+\d][\d \-]{6,}\r?\n([^\r\n\/]+)\r?\nየላኪ ስም/);
 
-        const toNum = (s: string | undefined) => (s ? parseFloat(s.replace(/,/g, '')) : undefined);
+        const toNum = (s: string | undefined) => (s ? parseFloat(s.replace(/[^\d.]/g, '')) : undefined);
         const cleanReason = (s: string | undefined) => {
             if (!s) return null;
             const trimmed = s.trim();
             return trimmed && trimmed !== '- - -' ? trimmed : null;
         };
+
+        // Sender: Send Money uses SENDER NAME/PHONE/TIN; B2C (bank → M-PESA) uses PAYER NAME/PHONE/TIN.
+        const senderName = valueAfterLabel(text, /\/\s*SENDER NAME\s*\r?\n/i)
+            ?? valueAfterLabel(text, /\/\s*PAYER NAME\s*\r?\n/i);
+        const senderPhone = phoneAfterLabel(text, /\/\s*SENDER PHONE NUMBER\s*\r?\n/i)
+            ?? phoneAfterLabel(text, /\/\s*PAYER PHONE NUMBER\s*\r?\n/i);
+        const senderTinRaw = valueAfterLabel(text, /\/\s*SENDER TIN NO\s*\r?\n/i)
+            ?? valueAfterLabel(text, /\/\s*PAYER TIN NO\s*\r?\n/i)
+            ?? numberAfterLabel(text, /\/\s*SENDER TIN NO\s*\r?\n/i)
+            ?? numberAfterLabel(text, /\/\s*PAYER TIN NO\s*\r?\n/i);
+
+        // Receiver name may be separated by an Amharic label line (B2C) — helpers skip it.
+        const receiverName = valueAfterLabel(text, /\/\s*RECEIVER NAME\s*\r?\n/i);
+        const receiverPhone = text.match(/(\d{9,15})\r?\n\/\s*TRANSACTION ID/i)?.[1];
+
+        const paymentMethod = valueAfterLabel(text, /\/\s*PAYMENT METHOD\s*\r?\n/i);
+        const paymentReason = cleanReason(valueAfterLabel(text, /\/\s*PAYMENT REASON\s*\r?\n/i));
+
+        // Type/channel: Send Money has TRANSACTION TYPE + PAYMENT CHANNEL; B2C has only type "B2C Payment".
+        const typeChannelMatch = text.match(/\/\s*TRANSACTION TYPE\s*\r?\n\/\s*PAYMENT CHANNEL\s*\r?\n([^\r\n]+)\r?\n([^\r\n]+)/i);
+        let transactionType = typeChannelMatch?.[1]?.trim();
+        const paymentChannel = typeChannelMatch?.[2]?.trim();
+        if (!transactionType && /\bB2C Payment\b/i.test(text)) transactionType = 'B2C Payment';
+
+        const total = toNum(numberAfterLabel(text, /\/\s*TOTAL\s*\r?\n/i));
+        const amountInWords = valueAfterLabel(text, /\/\s*TOTAL AMOUNT IN WORDS\s*\r?\n/i)
+            ?.replace(/\s+/g, ' ').trim();
+
+        // Fees sit directly ABOVE their labels (never the settled-amount row, which has trailing text).
+        const serviceFee = feeAboveLabel(text, /\/\s*SERVICE FEE\s*\r?\n/i);
+        const vat = feeAboveLabel(text, /\/\s*\+?\s*15% VAT\s*\r?\n/i);
+
+        const institution = text.match(/[+\d][\d \-]{6,}\r?\n([^\r\n\/]+)\r?\nየላኪ ስም/)?.[1]?.trim()
+            ?? text.match(/(Safaricom M-PESA Mobile Financial Services)/i)?.[1];
 
         const trxId = trxIdMatch?.[1]?.trim() || reference;
         const receiptNo = rowMatch?.[1]?.trim();
@@ -281,22 +366,22 @@ async function parseSafaricomReceipt(buffer: Buffer, reference: string): Promise
             success: true,
             reference: trxId,
             receiptNo,
-            senderName: senderNameMatch?.[1]?.trim(),
-            senderPhone: senderPhoneMatch?.[1]?.trim(),
-            senderTin: cleanReason(senderTinMatch?.[1]) || undefined,
-            receiverName: receiverNameMatch?.[1]?.trim(),
-            receiverPhone: receiverPhoneMatch?.[1]?.trim(),
-            paymentMethod: paymentMethodMatch?.[1]?.trim(),
-            transactionType: typeChannelMatch?.[1]?.trim(),
-            paymentChannel: typeChannelMatch?.[2]?.trim(),
-            paymentReason: cleanReason(paymentReasonMatch?.[1]),
+            senderName,
+            senderPhone,
+            senderTin: cleanReason(senderTinRaw) || undefined,
+            receiverName,
+            receiverPhone,
+            paymentMethod,
+            transactionType,
+            paymentChannel,
+            paymentReason,
             amount,
-            serviceFee: toNum(feeVatMatch?.[1]),
-            vat: toNum(feeVatMatch?.[2]),
-            total: toNum(totalMatch?.[1]) ?? amount,
-            amountInWords: wordsMatch?.[1]?.replace(/\s+/g, ' ').trim(),
+            serviceFee,
+            vat,
+            total: total ?? amount,
+            amountInWords,
             date,
-            institution: institutionMatch?.[1]?.trim(),
+            institution,
         };
 
         if (!result.reference || result.amount === undefined) {
