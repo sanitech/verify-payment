@@ -35,6 +35,15 @@ export type SafaricomVerifyResult = SafaricomReceipt | SafaricomFailure;
 const RECEIPT_ENDPOINT = 'https://m-pesabusiness.safaricom.et/api/receipt/getReceipt';
 const REFERENCE_RE = /^[A-Z0-9]{6,20}$/;
 
+// Safaricom's edge intermittently drops or hangs connections (even from an
+// Ethiopian IP), so the direct fetch is retried a few times before giving up.
+const SAFARICOM_RETRY_COUNT = parseInt(process.env.SAFARICOM_RETRY_COUNT || '4', 10);
+const SAFARICOM_RETRY_DELAY_MS = parseInt(process.env.SAFARICOM_RETRY_DELAY_MS || '1000', 10);
+
+function delay(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 interface SafaricomApiResponse {
     responseCode?: string | number;
     responseDescription?: string;
@@ -126,6 +135,27 @@ async function fetchDirectly(trxNo: string): Promise<SafaricomApiResponse> {
     return response.data;
 }
 
+// Direct fetch is the primary path (no proxy cost). Retried because Safaricom's
+// edge drops connections intermittently.
+async function fetchDirectlyWithRetry(trxNo: string): Promise<SafaricomApiResponse> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= SAFARICOM_RETRY_COUNT; attempt++) {
+        try {
+            return await fetchDirectly(trxNo);
+        } catch (error) {
+            lastError = error;
+            const detail = error instanceof AxiosError ? (error.code || error.message) : String(error);
+            if (attempt < SAFARICOM_RETRY_COUNT) {
+                logger.warn(`Safaricom direct attempt ${attempt}/${SAFARICOM_RETRY_COUNT} failed (${detail}). Retrying in ${SAFARICOM_RETRY_DELAY_MS}ms...`);
+                await delay(SAFARICOM_RETRY_DELAY_MS);
+            } else {
+                logger.error(`Safaricom direct attempt ${attempt}/${SAFARICOM_RETRY_COUNT} failed (${detail}).`);
+            }
+        }
+    }
+    throw lastError;
+}
+
 // Extracts the M-PESA transaction number from a raw SMS. Sent-money SMSes contain
 // a receipt URL of the form https://m-pesabusiness.safaricom.et/receipt/<ref>, and
 // both sent and received SMSes include "Transaction number [is] <ref>".
@@ -151,37 +181,37 @@ export async function verifySafaricom(reference: string): Promise<SafaricomVerif
     let unlockerError: string | null = null;
     let directError: string | null = null;
 
-    if (hasUnlocker) {
+    // Step 1: direct fetch (no proxy). Preferred — works when this service runs
+    // from an Ethiopian egress IP and costs nothing.
+    try {
+        apiResponse = await fetchDirectlyWithRetry(trxNo);
+    } catch (error) {
+        if (error instanceof AxiosError) {
+            const status = error.response?.status;
+            const detail = error.code || (status ? `HTTP ${status}` : 'network error');
+            logger.error(`Direct Safaricom fetch failed (${detail}): ${error.message}`);
+            directError = `${detail}${error.message ? ` — ${error.message}` : ''}`;
+        } else {
+            logger.error('Unexpected error in direct Safaricom fetch:', error);
+            directError = error instanceof Error ? error.message : 'unknown error';
+        }
+    }
+
+    // Step 2: Bright Data Web Unlocker fallback (only when configured).
+    if (!apiResponse && hasUnlocker) {
         try {
+            logger.warn('Direct Safaricom fetch failed. Trying Bright Data Web Unlocker fallback...');
             apiResponse = await fetchViaWebUnlocker(trxNo);
         } catch (err) {
             unlockerError = err instanceof Error ? err.message : String(err);
             logger.error(`Safaricom Web Unlocker leg failed: ${unlockerError}`);
         }
-    } else {
-        unlockerError = 'not configured (BRIGHT_DATA_UNLOCKER_TOKEN / BRIGHT_DATA_UNLOCKER_ZONE missing)';
-    }
-
-    if (!apiResponse) {
-        try {
-            apiResponse = await fetchDirectly(trxNo);
-        } catch (error) {
-            if (error instanceof AxiosError) {
-                const status = error.response?.status;
-                const detail = error.code || (status ? `HTTP ${status}` : 'network error');
-                logger.error(`Direct Safaricom fetch failed (${detail}): ${error.message}`);
-                directError = `${detail}${error.message ? ` — ${error.message}` : ''}`;
-            } else {
-                logger.error('Unexpected error in direct Safaricom fetch:', error);
-                directError = error instanceof Error ? error.message : 'unknown error';
-            }
-        }
     }
 
     if (!apiResponse) {
         const parts: string[] = [];
-        if (unlockerError) parts.push(`unlocker: ${unlockerError}`);
         if (directError) parts.push(`direct: ${directError}`);
+        if (unlockerError) parts.push(`unlocker: ${unlockerError}`);
         return {
             success: false,
             error: `Failed to fetch Safaricom receipt (${parts.join('; ') || 'unknown error'})`,
