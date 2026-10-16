@@ -10,25 +10,82 @@ function parseTrxId(trx: string): string {
         : trx;
 }
 
+const ABYSSINIA_RETRY_COUNT = parseInt(process.env.ABYSSINIA_RETRY_COUNT || '3', 10);
+const ABYSSINIA_RETRY_DELAY_MS = parseInt(process.env.ABYSSINIA_RETRY_DELAY_MS || '1500', 10);
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Pulls the slip reference out of a pasted SMS / slip link, e.g.
+// https://cs.bankofabyssinia.com/slip/?trx=FT26289Q36HJ31164 (the cs/?trx=DFT... feedback link is ignored).
+export function extractAbyssiniaReference(text: string): string | null {
+    if (!text) return null;
+    const slip = text.match(/bankofabyssinia\.com\/slip\/?[^\s]*[?&](?:trx|id)=([A-Z0-9]{8,30})/i);
+    if (slip) return slip[1].toUpperCase();
+    const bare = text.trim().match(/^(FT[A-Z0-9]{8,28})$/i);
+    return bare ? bare[1].toUpperCase() : null;
+}
+
+// The SMS id is the 12-char bank reference followed by 5 extra digits; the slip API may expect either form.
+function candidateIds(reference: string): string[] {
+    const id = reference.trim().toUpperCase();
+    const ids = [parseTrxId(id)];
+    if (/^FT[A-Z0-9]{10}\d{5}$/.test(id)) ids.push(id.slice(0, 12));
+    return [...new Set(ids)];
+}
+
+async function fetchSlip(trxId: string): Promise<any> {
+    const apiUrl = `https://cs.bankofabyssinia.com/api/onlineSlip/getDetails/?id=${encodeURIComponent(trxId)}`;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= ABYSSINIA_RETRY_COUNT; attempt++) {
+        try {
+            const response = await axios.get(apiUrl, {
+                timeout: 30000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'application/json, text/plain, */*',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache'
+                }
+            });
+            return response.data;
+        } catch (error) {
+            lastError = error;
+            const detail = error instanceof AxiosError ? (error.code || error.message) : String(error);
+            logger.warn(`Abyssinia fetch ${trxId} attempt ${attempt}/${ABYSSINIA_RETRY_COUNT} failed (${detail})`);
+            if (attempt < ABYSSINIA_RETRY_COUNT) await delay(ABYSSINIA_RETRY_DELAY_MS);
+        }
+    }
+    throw lastError;
+}
+
+export async function verifyAbyssiniaText(text: string): Promise<VerifyResult> {
+    const reference = extractAbyssiniaReference(text);
+    if (!reference) {
+        return { success: false, error: 'Could not find a Bank of Abyssinia slip reference in the provided text' };
+    }
+    return verifyAbyssinia(reference);
+}
+
 export async function verifyAbyssinia(reference: string): Promise<VerifyResult> {
     try {
-        const trxId = parseTrxId(reference);
         logger.info(`Starting Abyssinia verification for reference: ${reference}`);
 
-        const apiUrl = `https://cs.bankofabyssinia.com/api/onlineSlip/getDetails/?id=${trxId}`;
-
-        const response = await axios.get(apiUrl, {
-            timeout: 30000,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'application/json, text/plain, */*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache'
+        let jsonData: any;
+        let fetchError: unknown;
+        for (const trxId of candidateIds(reference)) {
+            try {
+                jsonData = await fetchSlip(trxId);
+                if (jsonData?.header?.status === 'success' && Array.isArray(jsonData.body) && jsonData.body.length > 0) break;
+            } catch (error) {
+                fetchError = error;
             }
-        });
-
-        const jsonData = response.data;
+        }
+        if (jsonData === undefined && fetchError) {
+            const code = fetchError instanceof AxiosError ? (fetchError.code || fetchError.message) : String(fetchError);
+            logger.error(`Abyssinia slip API unreachable for ${reference}: ${code}`);
+            return { success: false, error: `Bank of Abyssinia receipt service is not responding (${code}). Please try again shortly.` };
+        }
 
         if (!jsonData || !jsonData.header || !jsonData.body || !Array.isArray(jsonData.body)) {
             return { success: false, error: 'Invalid response structure from Abyssinia API' };
