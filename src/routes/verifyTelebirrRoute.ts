@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { verifyTelebirr, TelebirrProxyTimeoutError } from '../services/verifyTelebirr';
+import { verifyTelebirr, TelebirrProxyTimeoutError, TelebirrBusyError } from '../services/verifyTelebirr';
 import logger from '../utils/logger';
 
 const router = Router();
@@ -26,6 +26,10 @@ router.post<{}, {}, VerifyTelebirrRequestBody>(
             }
             res.json({ success: true, data: result });
         } catch (err) {
+            if (err instanceof TelebirrBusyError) {
+                res.status(503).json({ success: false, error: err.message, code: err.code });
+                return;
+            }
             if (err instanceof TelebirrProxyTimeoutError) {
                 res.status(504).json({
                     success: false,

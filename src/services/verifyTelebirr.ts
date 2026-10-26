@@ -19,6 +19,55 @@ export class TelebirrProxyTimeoutError extends Error {
 const VERIFY_RETRY_COUNT = parseInt(process.env.VERIFY_RETRY_COUNT || "2", 10);
 const VERIFY_RETRY_DELAY_MS = parseInt(process.env.VERIFY_RETRY_DELAY_MS || "1500", 10);
 
+// Per-request network timeout. Fail fast so a slow Telebirr does not pin the caller for a minute.
+const FETCH_TIMEOUT_MS = parseInt(process.env.TELEBIRR_FETCH_TIMEOUT_MS || "15000", 10);
+
+// Limit simultaneous Telebirr lookups; extra requests wait briefly in a queue, then get rejected (HTTP 503).
+const MAX_CONCURRENT_LOOKUPS = parseInt(process.env.TELEBIRR_MAX_CONCURRENT || "10", 10);
+const MAX_QUEUED_LOOKUPS = parseInt(process.env.TELEBIRR_MAX_QUEUE || "50", 10);
+const QUEUE_WAIT_TIMEOUT_MS = parseInt(process.env.TELEBIRR_QUEUE_WAIT_MS || "20000", 10);
+
+export class TelebirrBusyError extends Error {
+    code = "VERIFIER_BUSY";
+    constructor(message = "Verifier is busy. Please try again in a moment.") {
+        super(message);
+        this.name = "TelebirrBusyError";
+    }
+}
+
+let activeLookups = 0;
+const lookupWaiters: Array<{ start: () => void; timer: NodeJS.Timeout }> = [];
+
+async function acquireLookupSlot(): Promise<void> {
+    if (activeLookups < MAX_CONCURRENT_LOOKUPS) {
+        activeLookups++;
+        return;
+    }
+    if (lookupWaiters.length >= MAX_QUEUED_LOOKUPS) {
+        throw new TelebirrBusyError();
+    }
+    await new Promise<void>((resolve, reject) => {
+        const waiter = {
+            start: () => {
+                clearTimeout(waiter.timer);
+                resolve();
+            },
+            timer: setTimeout(() => {
+                const i = lookupWaiters.indexOf(waiter);
+                if (i >= 0) lookupWaiters.splice(i, 1);
+                reject(new TelebirrBusyError());
+            }, QUEUE_WAIT_TIMEOUT_MS),
+        };
+        lookupWaiters.push(waiter);
+    });
+}
+
+function releaseLookupSlot() {
+    const next = lookupWaiters.shift();
+    if (next) next.start(); // hand the slot straight to the next waiter
+    else activeLookups--;
+}
+
 function delay(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -505,7 +554,7 @@ async function fetchFromPrimarySource(reference: string, baseUrl: string): Promi
         if (proxy) {
             logger.info(`Using Bright Data residential proxy (${proxy.host}:${proxy.port}) for ${url}`);
         }
-        const response = await axios.get(url, { timeout: 60000, proxy }); // 60 second timeout
+        const response = await axios.get(url, { timeout: FETCH_TIMEOUT_MS, proxy });
         logger.debug(`Received response with status: ${response.status}`);
 
         const extractedData = scrapeTelebirrReceipt(response.data);
@@ -570,7 +619,7 @@ async function fetchFromPuppeteer(reference: string, baseUrl: string): Promise<T
             }
         });
 
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: FETCH_TIMEOUT_MS });
         const html = await page.content();
         logger.debug(`Puppeteer received ${html.length} bytes of HTML for reference: ${reference}`);
 
@@ -613,7 +662,7 @@ async function fetchFromWebUnlocker(reference: string, baseUrl: string): Promise
             "https://api.brightdata.com/request",
             { zone, url, country, format: "raw" },
             {
-                timeout: 90000,
+                timeout: FETCH_TIMEOUT_MS,
                 headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
             }
         );
@@ -659,7 +708,7 @@ async function fetchFromProxySource(reference: string, proxyUrl: string): Promis
             url,
             { reference },
             {
-                timeout: 60000,
+                timeout: FETCH_TIMEOUT_MS,
                 headers: {
                     'Accept': 'application/json',
                     'User-Agent': 'VerifierAPI/1.0',
@@ -761,7 +810,14 @@ export async function verifyTelebirr(reference: string): Promise<TelebirrReceipt
         return existing;
     }
 
-    const run = (): Promise<TelebirrReceipt | null> => verifyTelebirrUncached(reference);
+    const run = async (): Promise<TelebirrReceipt | null> => {
+        await acquireLookupSlot();
+        try {
+            return await verifyTelebirrUncached(reference);
+        } finally {
+            releaseLookupSlot();
+        }
+    };
     const promise = run();
     inFlight.set(reference, promise);
     try {
@@ -777,9 +833,8 @@ export async function verifyTelebirr(reference: string): Promise<TelebirrReceipt
 
 async function verifyTelebirrUncached(reference: string): Promise<TelebirrReceipt | null> {
     const primaryUrl = "https://transactioninfo.ethiotelecom.et/receipt/";
-    const fallbackUrl =
-        process.env.TELEBIRR_FALLBACK_URL ||
-        "https://payment-verify.pinael.com/verify-telebirr";
+    // Optional: the old default (payment-verify.pinael.com) no longer resolves, so the proxy step runs only when configured.
+    const fallbackUrl = process.env.TELEBIRR_FALLBACK_URL;
 
     const skipPrimary = process.env.SKIP_PRIMARY_VERIFICATION === "true";
 
@@ -814,11 +869,13 @@ async function verifyTelebirrUncached(reference: string): Promise<TelebirrReceip
         logger.info("Skipping Puppeteer step (Cloudflare runtime).");
     }
 
-    // Step 3: Fallback proxy
-    const fallbackResult = await attemptFetch(fetchFromProxySource, reference, fallbackUrl, "fallback proxy");
-    if (fallbackResult && isValidReceipt(fallbackResult)) {
-        logger.info(`Successfully verified Telebirr receipt using fallback proxy for reference: ${reference}`);
-        return fallbackResult;
+    // Step 3: Fallback proxy (only when TELEBIRR_FALLBACK_URL is set)
+    if (fallbackUrl) {
+        const fallbackResult = await attemptFetch(fetchFromProxySource, reference, fallbackUrl, "fallback proxy");
+        if (fallbackResult && isValidReceipt(fallbackResult)) {
+            logger.info(`Successfully verified Telebirr receipt using fallback proxy for reference: ${reference}`);
+            return fallbackResult;
+        }
     }
 
     logger.error(`All Telebirr verification methods failed for reference: ${reference}`);
